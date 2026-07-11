@@ -14,10 +14,10 @@ pnpm dev
 pnpm dev:server
 pnpm dev:web
 pnpm dev:desktop
-pnpm dev:tauri
+pnpm dev:desktop:preview
 ```
 
-`pnpm dev` 会为桌面前端、管理后台和授权服务分别分配空闲端口，并同步配置客户端授权地址、Web API 代理和服务端 CORS；具体地址以启动时的终端输出为准。单独运行 `pnpm dev:web` 或 `pnpm dev:server` 时仍分别使用 `1421` 和 `8787`，若端口被占用可通过 `WEB_DEV_PORT` 或 `PORT` 覆盖。首次启动服务端会创建管理员 `admin@qingpan.local`，密码来自 `ADMIN_PASSWORD`；开发默认值为 `change-me-now`，生产环境必须覆盖。
+`pnpm dev` 会同时启动 Tauri 桌面窗口、管理后台和授权服务。开发端口固定为：桌面资源服务 `127.0.0.1:1420`、管理后台 `127.0.0.1:3000`、授权 API `127.0.0.1:8787`。`pnpm dev:desktop` 单独启动 Tauri 应用，`pnpm dev:desktop:preview` 只启动浏览器预览。首次启动服务端会创建管理员 `admin@qingpan.local`，密码来自 `ADMIN_PASSWORD`；开发默认值为 `change-me-now`，生产环境必须覆盖。
 
 ## 安全约束
 
@@ -32,7 +32,10 @@ pnpm dev:tauri
 ```bash
 pnpm build
 pnpm test
+pnpm tauri:build
 cd desktop/src-tauri && cargo test
 ```
+
+`pnpm build` 只构建三个 workspace 的前端与服务端产物；`pnpm tauri:build` 会从根目录调用 desktop workspace 的 Tauri CLI，生成当前目标平台的安装包。Windows 的 MSI/NSIS 包应在 Windows x64 或 ARM64 环境及对应 CI 任务中执行。
 
 Windows 安装包由 CI 分别构建 `x86_64-pc-windows-msvc` 和 `aarch64-pc-windows-msvc`。空间分析与管理界面的样例数据用于非 Windows 预览；Windows 构建通过 Tauri 命令读取真实磁盘、缓存目录和注册表。

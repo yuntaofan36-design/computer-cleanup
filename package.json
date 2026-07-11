@@ -4,11 +4,14 @@
   "version": "0.1.0",
   "packageManager": "pnpm@11.8.0",
   "scripts": {
-    "dev": "node scripts/dev.mjs",
+    "dev": "pnpm --parallel --filter qingpan --filter qingpan-web --filter qingpan-server run dev",
     "dev:desktop": "pnpm --filter qingpan dev",
-    "dev:tauri": "pnpm --filter qingpan dev:tauri",
+    "dev:desktop:preview": "pnpm --filter qingpan dev:preview",
     "dev:web": "pnpm --filter qingpan-web dev",
     "dev:server": "pnpm --filter qingpan-server dev",
+    "tauri:build": "pnpm --filter qingpan tauri build",
+    "tauri:cross:x64": "node scripts/cross-windows.mjs x64",
+    "tauri:cross:arm64": "node scripts/cross-windows.mjs arm64",
     "build": "pnpm -r --if-present build",
     "test": "pnpm -r --if-present test"
   },
