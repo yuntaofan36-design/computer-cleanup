@@ -1,0 +1,7 @@
+import { DatabaseSync } from 'node:sqlite';import { mkdirSync } from 'node:fs';import { dirname } from 'node:path';import { hashPassword } from './security.js';
+export function openDb(path:string,adminPassword:string){mkdirSync(dirname(path),{recursive:true});const db=new DatabaseSync(path);db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+CREATE TABLE IF NOT EXISTS admins(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS licenses(id TEXT PRIMARY KEY,key_hash TEXT UNIQUE NOT NULL,prefix TEXT NOT NULL,plan TEXT NOT NULL,duration_days INTEGER,status TEXT NOT NULL DEFAULT 'unused',max_devices INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,expires_at TEXT);
+CREATE TABLE IF NOT EXISTS activations(id TEXT PRIMARY KEY,license_id TEXT NOT NULL,device_hash TEXT NOT NULL,device_name TEXT NOT NULL,created_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,revoked_at TEXT,UNIQUE(license_id,device_hash),FOREIGN KEY(license_id) REFERENCES licenses(id));
+CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY,actor TEXT NOT NULL,action TEXT NOT NULL,target TEXT,detail TEXT,ip TEXT,created_at TEXT NOT NULL);`);
+const exists=db.prepare('SELECT id FROM admins LIMIT 1').get();if(!exists)db.prepare('INSERT INTO admins VALUES(?,?,?,?)').run('admin','admin@qingpan.local',hashPassword(adminPassword),new Date().toISOString());return db}

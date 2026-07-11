@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "清盘",
+  "version": "0.1.0",
+  "identifier": "com.qingpan.desktop",
+  "build": { "beforeDevCommand": "pnpm dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "pnpm build", "frontendDist": "../dist" },
+  "app": { "windows": [{ "title": "清盘", "width": 1280, "height": 800, "minWidth": 900, "minHeight": 640, "center": true, "decorations": true }], "security": { "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8787 https:; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'" } },
+  "bundle": { "active": true, "targets": ["nsis", "msi"], "windows": { "wix": { "language": "zh-CN" }, "nsis": { "languages": ["SimpChinese"] } } }
+}

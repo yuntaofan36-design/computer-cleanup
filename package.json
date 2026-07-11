@@ -1,0 +1,18 @@
+{
+  "name": "qingpan-suite",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:desktop": "pnpm --filter qingpan dev",
+    "dev:tauri": "pnpm --filter qingpan dev:tauri",
+    "dev:web": "pnpm --filter qingpan-web dev",
+    "dev:server": "pnpm --filter qingpan-server dev",
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r --if-present test"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
