@@ -1,42 +1,380 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AppWindow, Boxes, Eraser, ChevronRight, Clock3, HardDrive, History, KeyRound, LayoutDashboard, Moon, Package, Play, Search, Settings, ShieldCheck, Sun, Trash2, X } from 'lucide-react';
+import {
+  Bell,
+  Boxes,
+  ChartNoAxesCombined,
+  ChevronDown,
+  Files,
+  HardDrive,
+  LayoutDashboard,
+  Package,
+  RotateCcw,
+  Settings,
+  ShieldCheck,
+  ShoppingBasket,
+  Sparkles,
+  X,
+} from 'lucide-react';
+import { BasketDrawer, Dialog } from './components';
+import {
+  directories as previewDirectories,
+  disks as previewDisks,
+  duplicateGroups as previewDuplicateGroups,
+  largeFiles as previewLargeFiles,
+  protectedPaths,
+  records as previewRecords,
+  storageCategories as previewStorageCategories,
+} from './mockData';
+import {
+  cancelNativeTask,
+  executeCleanup,
+  isNativeRuntime,
+  loadApps,
+  loadDisks,
+  loadOperationRecords,
+  requestUninstall,
+  revealInExplorer,
+  scanCleanup,
+  scanDuplicateFiles,
+  scanLargeFiles,
+  scanStorageUsage,
+} from './native';
+import AppManagement from './pages/AppManagement';
+import CleanupCenter from './pages/CleanupCenter';
+import FileDiscovery, { type FileDiscoveryTab } from './pages/FileDiscovery';
+import Overview from './pages/Overview';
+import RecoveryCenter from './pages/RecoveryCenter';
+import SettingsPage from './pages/SettingsPage';
+import StorageAnalysis from './pages/StorageAnalysis';
 import { useAppStore } from './store';
-import { apps, cleanupItems, disks, records, startups } from './mockData';
-import { formatBytes, percent } from './format';
-import type { Page } from './types';
+import { formatBytes } from './format';
+import type {
+  AppEntry,
+  DirectoryUsage,
+  DiskInfo,
+  DuplicateGroup,
+  LargeFileEntry,
+  OperationRecord,
+  Page,
+  StorageCategory,
+} from './types';
 
-const nav: {id:Page; label:string; icon: typeof LayoutDashboard}[] = [
-  {id:'overview',label:'概览',icon:LayoutDashboard},{id:'cleanup',label:'安全清理',icon:Eraser},{id:'storage',label:'空间分析',icon:HardDrive},
-  {id:'apps',label:'应用管理',icon:Package},{id:'startup',label:'启动项',icon:Play},{id:'history',label:'历史记录',icon:History},{id:'settings',label:'设置',icon:Settings}
+const primaryNav: Array<{ id: Page; label: string; description: string; icon: typeof LayoutDashboard }> = [
+  { id: 'overview', label: '空间概览', description: '磁盘与建议', icon: LayoutDashboard },
+  { id: 'cleanup', label: '清理中心', description: '有证据地清理', icon: Sparkles },
+  { id: 'files', label: '文件发现', description: '大文件与重复项', icon: Files },
+  { id: 'analysis', label: '磁盘地图', description: '空间可视化', icon: ChartNoAxesCombined },
 ];
 
-function Dialog({title, body, danger, onClose, onConfirm}:{title:string;body:string;danger?:boolean;onClose:()=>void;onConfirm:()=>void}) {
-  return <div className="overlay" role="presentation" onMouseDown={onClose}><div className="dialog" role="dialog" aria-modal="true" onMouseDown={e=>e.stopPropagation()}>
-    <button className="icon-button dialog-close" onClick={onClose} aria-label="关闭"><X size={18}/></button><h2>{title}</h2><p>{body}</p>
-    <div className="dialog-actions"><button className="button secondary" onClick={onClose}>取消</button><button className={`button ${danger?'danger':'primary'}`} onClick={onConfirm}>确认执行</button></div>
-  </div></div>;
+const secondaryNav: Array<{ id: Page; label: string; icon: typeof Package }> = [
+  { id: 'apps', label: '应用管理', icon: Package },
+  { id: 'recovery', label: '恢复与记录', icon: RotateCcw },
+  { id: 'settings', label: '安全设置', icon: Settings },
+];
+
+const scanPaths = [
+  '正在读取 Windows 临时目录…',
+  '正在识别浏览器配置文件…',
+  '正在核对可重建应用缓存…',
+  '正在排除链接、同步目录与锁定文件…',
+  '正在生成不可变清理计划…',
+];
+
+const builtInExclusionRules = [
+  '*.pst / *.ost 邮件存档',
+  '*.vhd / *.vhdx 虚拟磁盘',
+  'Git 与工作区目录',
+  'OneDrive 未同步文件',
+];
+const exclusionsKey = 'qingpanUserExclusions';
+const unavailableDisk: DiskInfo = { id: 'unavailable', name: '磁盘不可用', mount: '', totalBytes: 0, freeBytes: 0 };
+type TaskStatus = 'idle' | 'scanning' | 'complete';
+
+function readUserExclusions(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(exclusionsKey) || '[]');
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
-function Overview({go}:{go:(p:Page)=>void}) { const d=disks[0], used=d.totalBytes-d.freeBytes; return <section><header className="page-head"><div><p className="eyebrow">系统状态良好</p><h1>下午好，准备好释放空间了吗？</h1><p>上次清理于今天 09:42，释放了 4.82 GB。</p></div><button className="button primary" onClick={()=>go('cleanup')}><Eraser size={18}/>开始扫描</button></header>
-  <div className="overview-grid"><div className="disk-panel"><div className="section-title"><span className="drive-icon"><HardDrive/></span><div><h2>{d.name} ({d.mount})</h2><p>{formatBytes(d.freeBytes)} 可用，共 {formatBytes(d.totalBytes)}</p></div><strong>{Math.round(percent(used,d.totalBytes))}%</strong></div><div className="meter large"><span style={{width:`${percent(used,d.totalBytes)}%`}}/></div><div className="legend"><span><i className="dot blue"/>已使用 {formatBytes(used)}</span><span><i className="dot gray"/>可用 {formatBytes(d.freeBytes)}</span></div></div>
-  <div className="score"><ShieldCheck/><div><span>清理建议</span><strong>约 14.3 GB</strong><small>5 类文件可以安全检查</small></div></div></div>
-  <h2 className="block-title">快捷操作</h2><div className="quick-grid">{[{p:'cleanup' as Page,i:Eraser,t:'安全清理',s:'缓存、临时文件与回收站'},{p:'storage' as Page,i:Search,t:'查找大文件',s:'快速定位占用空间的内容'},{p:'apps' as Page,i:Boxes,t:'管理应用',s:'查看并卸载不再使用的软件'}].map(x=><button className="quick" key={x.t} onClick={()=>go(x.p)}><x.i/><span><strong>{x.t}</strong><small>{x.s}</small></span><ChevronRight/></button>)}</div>
-  <h2 className="block-title">最近活动</h2><div className="list">{records.slice(0,2).map(r=><div className="list-row" key={r.id}><span className="row-icon"><Clock3/></span><div className="grow"><strong>{r.title}</strong><small>{r.createdAt} · {r.detail}</small></div><b className="success">+ {formatBytes(r.reclaimedBytes)}</b></div>)}</div></section> }
+function scanTime(): string {
+  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date());
+}
 
-function Cleanup(){const {scanning,setScanning,progress,setProgress,selected,toggleItem,setSafeDefaults,clearSelection}=useAppStore(); const [confirm,setConfirm]=useState(false); const [done,setDone]=useState(false);
- useEffect(()=>{if(!scanning)return; const t=setInterval(()=>setProgress(Math.min(100,progress+4)),120); if(progress>=100){setScanning(false);setSafeDefaults(cleanupItems);clearInterval(t)}return()=>clearInterval(t)},[scanning,progress,setProgress,setScanning,setSafeDefaults]);
- const selectedSize=cleanupItems.filter(i=>selected.has(i.id)).reduce((a,b)=>a+b.sizeBytes,0); const start=()=>{setDone(false);clearSelection();setProgress(0);setScanning(true)};
- return <section><header className="page-head"><div><h1>安全清理</h1><p>检查系统与应用产生的无用文件，执行前由你确认。</p></div>{!scanning&&<button className="button primary" onClick={start}><Search size={18}/>{progress?'重新扫描':'开始扫描'}</button>}</header>
- {scanning?<div className="scan-state"><div className="scan-ring"><Search/><span>{progress}%</span></div><h2>正在检查可清理内容</h2><p>C:\Users\User\AppData\Local\Temp</p><div className="meter"><span style={{width:`${progress}%`}}/></div><button className="button secondary" onClick={()=>setScanning(false)}>取消扫描</button></div>:<>{done&&<div className="notice success-bg"><ShieldCheck/>清理完成，已释放 {formatBytes(selectedSize)}。</div>}{progress===100&&<><div className="summary-bar"><div><small>已发现</small><strong>{formatBytes(cleanupItems.reduce((a,b)=>a+b.sizeBytes,0))}</strong></div><div><small>已选择</small><strong>{formatBytes(selectedSize)}</strong></div><span>默认仅选择低风险项目</span></div><div className="list cleanup-list">{cleanupItems.map(i=><label className="list-row" key={i.id}><input type="checkbox" checked={selected.has(i.id)} onChange={()=>toggleItem(i.id)}/><div className="grow"><strong>{i.name}<span className={`badge ${i.risk}`}>{i.risk==='low'?'低风险':i.risk==='medium'?'需确认':'高风险'}</span></strong><small>{i.description} · {i.path}</small></div><b>{formatBytes(i.sizeBytes)}</b></label>)}</div><div className="action-bar"><span>将清理 <strong>{formatBytes(selectedSize)}</strong></span><button className="button primary" disabled={!selected.size} onClick={()=>setConfirm(true)}><Trash2 size={18}/>清理所选项</button></div></>}</>}
- {confirm&&<Dialog title="确认清理所选内容？" body={`将处理 ${selected.size} 个类别，预计释放 ${formatBytes(selectedSize)}。缓存文件将永久删除，回收站内容无法恢复。`} danger onClose={()=>setConfirm(false)} onConfirm={()=>{setConfirm(false);setDone(true);clearSelection()}}/>}</section>}
+function pathIsInside(path: string, excludedPath: string): boolean {
+  const normalize = (value: string) => value.replace(/\//g, '\\').replace(/\\+$/, '').toLocaleLowerCase();
+  const candidate = normalize(path);
+  const excluded = normalize(excludedPath);
+  return candidate === excluded || candidate.startsWith(`${excluded}\\`);
+}
 
-function Storage(){return <section><header className="page-head"><div><h1>空间分析</h1><p>按目录、文件类型和大小了解磁盘空间去向。</p></div><button className="button primary"><Search size={18}/>扫描磁盘</button></header><div className="storage-layout"><div><h2 className="block-title">存储分布</h2><div className="storage-bar"><span style={{width:'34%',background:'#3578e5'}}/><span style={{width:'22%',background:'#17a673'}}/><span style={{width:'17%',background:'#e6a23c'}}/><span style={{width:'12%',background:'#8a63d2'}}/></div><div className="category-grid">{[['应用和游戏','112.4 GB','#3578e5'],['图片与视频','72.1 GB','#17a673'],['系统和保留','55.9 GB','#e6a23c'],['其他','39.5 GB','#8a63d2']].map(x=><div><i style={{background:x[2]}}/><span>{x[0]}</span><b>{x[1]}</b></div>)}</div><h2 className="block-title">最大的文件夹</h2><div className="list">{[['Users','168.2 GB'],['Program Files','82.4 GB'],['Windows','51.7 GB'],['ProgramData','18.6 GB']].map((x,i)=><div className="list-row"><span className="rank">{i+1}</span><div className="grow"><strong>{x[0]}</strong><small>C:\{x[0]}</small></div><b>{x[1]}</b><ChevronRight size={17}/></div>)}</div></div><aside className="side-tool"><h2>智能查找</h2><button><Search/><span><strong>大文件</strong><small>超过 1 GB 的文件</small></span><ChevronRight/></button><button><Boxes/><span><strong>重复文件</strong><small>按内容哈希精确比较</small></span><ChevronRight/></button><p>分析结果仅供查看，不会自动删除任何文件。</p></aside></div></section>}
+function exclusionsWithinRoot(exclusions: string[], root: string): string[] {
+  return exclusions.filter((path) => pathIsInside(path, root) && !pathIsInside(root, path));
+}
 
-function Apps(){const [target,setTarget]=useState<string|null>(null);return <section><header className="page-head"><div><h1>应用管理</h1><p>查看已安装应用及其空间占用。</p></div><div className="searchbox"><Search/><input aria-label="搜索应用" placeholder="搜索应用"/></div></header><div className="table"><div className="table-head"><span>应用</span><span>安装日期</span><span>大小</span><span/></div>{apps.map(a=><div className="table-row"><span className="app-name"><span className="app-icon">{a.name[0]}</span><span><strong>{a.name}</strong><small>{a.publisher} · {a.version}</small></span></span><span>{a.installedAt}</span><span>{formatBytes(a.sizeBytes)}</span><button className="button secondary small" onClick={()=>setTarget(a.id)}>卸载</button></div>)}</div>{target&&<Dialog title={`卸载 ${apps.find(a=>a.id===target)?.name}？`} body="将启动该应用自己的卸载程序。清盘不会直接删除程序目录。" danger onClose={()=>setTarget(null)} onConfirm={()=>setTarget(null)}/>}</section>}
+export default function App() {
+  const {
+    page, setPage, theme, disks, setDisks, activeDiskId, setActiveDiskId,
+    cleanupItems, setCleanupItems, selected, toggleItem, setSafeDefaults, clearSelection, removeSelected,
+    scanning, setScanning, progress, setProgress, scanPath, setScanPath, lastScanAt, setLastScanAt,
+    basketOpen, setBasketOpen,
+  } = useAppStore();
+  const nativeRuntime = isNativeRuntime();
+  const [installedApps, setInstalledApps] = useState<AppEntry[]>([]);
+  const [operationRecords, setOperationRecords] = useState<OperationRecord[]>(nativeRuntime ? [] : previewRecords);
+  const [discoveryFiles, setDiscoveryFiles] = useState<LargeFileEntry[]>(nativeRuntime ? [] : previewLargeFiles);
+  const [discoveryDuplicates, setDiscoveryDuplicates] = useState<DuplicateGroup[]>(nativeRuntime ? [] : previewDuplicateGroups);
+  const [analysisDirectories, setAnalysisDirectories] = useState<DirectoryUsage[]>(nativeRuntime ? [] : previewDirectories);
+  const [analysisCategories, setAnalysisCategories] = useState<StorageCategory[]>(nativeRuntime ? [] : previewStorageCategories);
+  const [fileScanStatus, setFileScanStatus] = useState<TaskStatus>(nativeRuntime ? 'idle' : 'complete');
+  const [analysisScanStatus, setAnalysisScanStatus] = useState<TaskStatus>(nativeRuntime ? 'idle' : 'complete');
+  const [fileScannedAt, setFileScannedAt] = useState(nativeRuntime ? '' : '演示数据');
+  const [analysisScannedAt, setAnalysisScannedAt] = useState(nativeRuntime ? '' : '演示数据');
+  const [fileTaskId, setFileTaskId] = useState<string | null>(null);
+  const [analysisTaskId, setAnalysisTaskId] = useState<string | null>(null);
+  const [userExclusions, setUserExclusions] = useState<string[]>(readUserExclusions);
+  const [busyAppId, setBusyAppId] = useState<string | null>(null);
+  const [executeOpen, setExecuteOpen] = useState(false);
+  const [executing, setExecuting] = useState(false);
+  const [toast, setToast] = useState('');
+  const activeDisk = disks.find((disk) => disk.id === activeDiskId) || disks[0] || (nativeRuntime ? unavailableDisk : previewDisks[0]);
+  const selectedItems = useMemo(() => cleanupItems.filter((item) => selected.has(item.id)), [cleanupItems, selected]);
+  const selectedBytes = selectedItems.reduce((sum, item) => sum + item.sizeBytes, 0);
+  const irreversibleCount = selectedItems.filter((item) => item.recoverability === 'irreversible').length;
+  const anyReadScan = fileScanStatus === 'scanning' || analysisScanStatus === 'scanning';
 
-function Startup(){const [rows,setRows]=useState(startups); const [target,setTarget]=useState<string|null>(null);const toggle=(id:string)=>setRows(r=>r.map(x=>x.id===id?{...x,enabled:!x.enabled}:x));return <section><header className="page-head"><div><h1>启动项</h1><p>减少不必要的开机自启动，让系统更快就绪。</p></div></header><div className="notice"><ShieldCheck/>系统安全相关启动项应保持开启。</div><div className="table startup-table"><div className="table-head"><span>名称</span><span>影响</span><span>范围</span><span>状态</span></div>{rows.map(x=><div className="table-row"><span className="app-name"><span className="row-icon"><AppWindow/></span><span><strong>{x.name}</strong><small>{x.publisher}</small></span></span><span><b className={`impact ${x.impact}`}>{x.impact}</b></span><span>{x.scope}</span><button role="switch" aria-checked={x.enabled} className={`switch ${x.enabled?'on':''}`} onClick={()=>setTarget(x.id)}><span/></button></div>)}</div>{target&&<Dialog title={`${rows.find(x=>x.id===target)?.enabled?'禁用':'启用'}此启动项？`} body="更改会在下次登录 Windows 时生效，你可以随时恢复。" onClose={()=>setTarget(null)} onConfirm={()=>{toggle(target);setTarget(null)}}/>}</section>}
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('qingpanTheme', theme);
+  }, [theme]);
 
-function HistoryPage(){return <section><header className="page-head"><div><h1>历史记录</h1><p>所有清理与系统修改都会保留本地记录。</p></div></header><div className="list history-list">{records.map(r=><div className="list-row"><span className="row-icon"><History/></span><div className="grow"><strong>{r.title}<span className={`badge ${r.status==='success'?'low':'medium'}`}>{r.status==='success'?'已完成':'部分完成'}</span></strong><small>{r.createdAt} · {r.detail}</small></div><b>{formatBytes(r.reclaimedBytes)}</b></div>)}</div></section>}
-function SettingsPage(){const {theme,setTheme}=useAppStore();return <section><header className="page-head"><div><h1>设置</h1><p>调整外观、安全和扫描偏好。</p></div></header><div className="settings-group"><h2>外观</h2><div className="setting-row"><span><strong>应用主题</strong><small>选择清盘的显示方式</small></span><div className="segments">{(['system','light','dark'] as const).map((x,i)=><button className={theme===x?'active':''} onClick={()=>setTheme(x)}>{[<AppWindow/>,<Sun/>,<Moon/>][i]}{['跟随系统','浅色','深色'][i]}</button>)}</div></div></div><div className="settings-group"><h2>安全</h2><div className="setting-row"><span><strong>删除前始终确认</strong><small>危险操作无法关闭确认步骤</small></span><span className="locked"><KeyRound/>已启用</span></div><div className="setting-row"><span><strong>匿名使用数据</strong><small>清盘不会收集或上传任何使用数据</small></span><span>关闭</span></div></div></section>}
+  useEffect(() => {
+    loadDisks().then(setDisks).catch((error) => setToast(error instanceof Error ? error.message : '无法读取磁盘'));
+    loadApps().then(setInstalledApps).catch((error) => setToast(error instanceof Error ? error.message : '无法读取应用清单'));
+    loadOperationRecords(50).then(setOperationRecords).catch(() => setOperationRecords(nativeRuntime ? [] : previewRecords));
+    if (!nativeRuntime) {
+      void scanCleanup().then(setCleanupItems);
+      setLastScanAt('演示数据 · 尚未执行真实扫描');
+    }
+  }, [nativeRuntime, setCleanupItems, setDisks, setLastScanAt]);
 
-export default function App(){const {page,setPage,theme}=useAppStore(); useEffect(()=>{document.documentElement.dataset.theme=theme},[theme]); return <div className="app-shell"><aside className="sidebar"><div className="brand"><span><Eraser/></span><strong>清盘</strong><small>空间管理</small></div><nav>{nav.slice(0,5).map(x=><button className={page===x.id?'active':''} onClick={()=>setPage(x.id)}><x.icon/>{x.label}</button>)}</nav><nav className="nav-bottom">{nav.slice(5).map(x=><button className={page===x.id?'active':''} onClick={()=>setPage(x.id)}><x.icon/>{x.label}</button>)}</nav><div className="license"><ShieldCheck/><span><strong>专业版已激活</strong><small>设备许可有效</small></span></div></aside><main>{page==='overview'&&<Overview go={setPage}/>} {page==='cleanup'&&<Cleanup/>}{page==='storage'&&<Storage/>}{page==='apps'&&<Apps/>}{page==='startup'&&<Startup/>}{page==='history'&&<HistoryPage/>}{page==='settings'&&<SettingsPage/>}</main></div>}
+  useEffect(() => {
+    if (!toast) return;
+    const timeout = window.setTimeout(() => setToast(''), 4200);
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
+
+  async function runScan() {
+    if (scanning) return;
+    setPage('cleanup');
+    setScanning(true);
+    setProgress(3);
+    setScanPath(scanPaths[0]);
+    clearSelection();
+    let index = 0;
+    const timer = window.setInterval(() => {
+      setProgress(Math.min(88, useAppStore.getState().progress + 4));
+      index = (index + 1) % scanPaths.length;
+      setScanPath(scanPaths[index]);
+    }, 180);
+    try {
+      if (!nativeRuntime) await new Promise((resolve) => window.setTimeout(resolve, 950));
+      const items = await scanCleanup();
+      window.clearInterval(timer);
+      setCleanupItems(items);
+      setSafeDefaults(items);
+      setProgress(100);
+      setScanPath(`已建立 ${items.length} 项安全快照`);
+      setLastScanAt(scanTime());
+      window.setTimeout(() => setScanning(false), 420);
+    } catch (error) {
+      window.clearInterval(timer);
+      setScanning(false);
+      setToast(error instanceof Error ? error.message : '扫描失败，请重试');
+    }
+  }
+
+  async function runCleanup() {
+    if (!selectedItems.length || executing) return;
+    setExecuting(true);
+    try {
+      const ids = selectedItems.map((item) => item.id);
+      const result = await executeCleanup(ids);
+      if (nativeRuntime) {
+        const refreshed = await scanCleanup();
+        setCleanupItems(refreshed);
+      } else {
+        setCleanupItems(cleanupItems.filter((item) => !ids.includes(item.id)));
+      }
+      removeSelected(ids);
+      setExecuteOpen(false);
+      setBasketOpen(false);
+      setOperationRecords(await loadOperationRecords(50));
+      setToast(`已实际释放 ${formatBytes(result.reclaimedBytes)}${result.failed.length ? `，${result.failed.length} 个文件因变化或占用被保留` : ''}`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '清理未执行');
+    } finally {
+      setExecuting(false);
+    }
+  }
+
+  async function runFileScan(tab: FileDiscoveryTab) {
+    if (!activeDisk.mount || fileScanStatus === 'scanning') return;
+    const taskId = crypto.randomUUID();
+    setFileTaskId(taskId);
+    setFileScanStatus('scanning');
+    try {
+      if (tab === 'large-files') {
+        const result = await scanLargeFiles(taskId, activeDisk.mount, {
+          minSizeBytes: 256 * 1024 ** 2,
+          maxFiles: 750_000,
+          maxResults: 2_000,
+          excludedPaths: exclusionsWithinRoot(userExclusions, activeDisk.mount),
+        });
+        if (!result.cancelled) setDiscoveryFiles(result.files);
+        setToast(result.cancelled ? '大文件分析已取消，保留上次结果' : `已分析 ${result.scannedFiles.toLocaleString()} 个文件，跳过 ${result.skipped.toLocaleString()} 项${result.limitReached ? '，结果达到安全上限' : ''}`);
+      } else {
+        const result = await scanDuplicateFiles(taskId, activeDisk.mount, {
+          minSizeBytes: 1024 ** 2,
+          maxFiles: 500_000,
+          maxGroups: 2_000,
+          maxMembers: 10_000,
+          sampleBytes: 64 * 1024,
+          excludedPaths: exclusionsWithinRoot(userExclusions, activeDisk.mount),
+        });
+        if (!result.cancelled) setDiscoveryDuplicates(result.groups);
+        setToast(result.cancelled ? '重复文件分析已取消，保留上次结果' : `已完成内容校验，发现 ${result.groups.length.toLocaleString()} 组重复项，跳过 ${result.skipped.toLocaleString()} 项`);
+      }
+      setFileScannedAt(scanTime());
+      setFileScanStatus('complete');
+    } catch (error) {
+      setFileScanStatus('idle');
+      setToast(error instanceof Error ? error.message : '文件分析失败');
+    } finally {
+      setFileTaskId(null);
+    }
+  }
+
+  async function cancelFileScan() {
+    if (!fileTaskId) return;
+    await cancelNativeTask(fileTaskId);
+    setToast('正在安全停止文件分析…');
+  }
+
+  async function runStorageScan(root = activeDisk.mount, merge = false) {
+    if (!root || analysisScanStatus === 'scanning') return;
+    const taskId = crypto.randomUUID();
+    setAnalysisTaskId(taskId);
+    setAnalysisScanStatus('scanning');
+    try {
+      const result = await scanStorageUsage(taskId, root, {
+        maxFiles: 750_000,
+        maxResults: 10_000,
+        excludedPaths: exclusionsWithinRoot(userExclusions, root),
+      });
+      if (!result.cancelled) {
+        setAnalysisDirectories((current) => {
+          if (!merge) return result.directories;
+          const combined = new Map(current.map((directory) => [directory.id, directory]));
+          result.directories.forEach((directory) => combined.set(directory.id, directory));
+          return [...combined.values()];
+        });
+        setAnalysisCategories(result.categories);
+      }
+      setAnalysisScannedAt(scanTime());
+      setAnalysisScanStatus('complete');
+      setToast(result.cancelled ? '目录分析已取消，保留上次结果' : `已索引 ${result.scannedFiles.toLocaleString()} 个文件${result.limitReached ? '，扫描达到安全上限' : ''}`);
+    } catch (error) {
+      setAnalysisScanStatus('idle');
+      setToast(error instanceof Error ? error.message : '目录分析失败');
+    } finally {
+      setAnalysisTaskId(null);
+    }
+  }
+
+  async function cancelStorageScan() {
+    if (!analysisTaskId) return;
+    await cancelNativeTask(analysisTaskId);
+    setToast('正在安全停止目录分析…');
+  }
+
+  async function uninstall(id: string) {
+    if (busyAppId) return;
+    setBusyAppId(id);
+    try {
+      const result = await requestUninstall(id);
+      setToast(`已启动应用官方卸载器（PID ${result.pid}）`);
+      setOperationRecords(await loadOperationRecords(50));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '无法启动卸载程序');
+    } finally {
+      setBusyAppId(null);
+    }
+  }
+
+  async function reveal(path: string) {
+    try {
+      await revealInExplorer(path);
+      setToast(nativeRuntime ? '已在文件资源管理器中定位' : `演示定位：${path}`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '无法定位文件');
+    }
+  }
+
+  function addExclusion(path: string) {
+    if (userExclusions.some((entry) => pathIsInside(path, entry))) {
+      setToast('此路径已在排除规则中');
+      return;
+    }
+    const next = [...userExclusions, path];
+    setUserExclusions(next);
+    localStorage.setItem(exclusionsKey, JSON.stringify(next));
+    setDiscoveryFiles((files) => files.filter((file) => !pathIsInside(file.path, path)));
+    setDiscoveryDuplicates((groups) => groups
+      .map((group) => {
+        let members = group.members.filter((member) => !pathIsInside(member.path, path));
+        if (members.length > 0 && !members.some((member) => member.suggestedKeep)) {
+          members = members.map((member, index) => ({ ...member, suggestedKeep: index === 0 }));
+        }
+        return { ...group, members, reclaimableBytes: group.sizeBytes * Math.max(0, members.length - 1) };
+      })
+      .filter((group) => group.members.length > 1));
+    setToast('已加入本机排除规则，后续扫描会在入口处跳过');
+  }
+
+  return <div className="app-shell">
+    <aside className="sidebar">
+      <div className="brand"><span className="brand-mark"><ShieldCheck /></span><div><strong>清盘</strong><small>QINGPAN · SAFE SPACE</small></div></div>
+      <div className="nav-label">空间工作台</div>
+      <nav className="primary-nav">{primaryNav.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)}><span><item.icon /></span><div><strong>{item.label}</strong><small>{item.description}</small></div></button>)}</nav>
+      <div className="nav-label secondary-label">管理</div>
+      <nav className="secondary-nav">{secondaryNav.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)}><item.icon /><span>{item.label}</span></button>)}</nav>
+      <div className="local-card"><span><ShieldCheck /></span><div><strong>文件信息仅在本机</strong><small>未上传路径与内容哈希</small></div></div>
+      <div className="sidebar-foot"><span className="avatar">QP</span><div><strong>专业版</strong><small>安全规则 v2026.07</small></div><Boxes /></div>
+    </aside>
+
+    <div className="app-stage">
+      <header className="topbar">
+        <button className="drive-select" aria-label="选择磁盘"><span><HardDrive /></span><div><small>当前分析磁盘</small><strong>{activeDisk.name} ({activeDisk.mount || '--'})</strong></div><select value={activeDiskId} disabled={anyReadScan || scanning} onChange={(event) => setActiveDiskId(event.target.value)}>{disks.map((disk) => <option key={disk.id} value={disk.id}>{disk.name} ({disk.mount})</option>)}</select><ChevronDown /></button>
+        <div className="topbar-status"><span className="live-dot" />保护引擎运行中</div>
+        <button className="icon-button top-icon" aria-label="通知"><Bell /></button>
+        <button className="basket-button" onClick={() => setBasketOpen(true)}><ShoppingBasket /><span><small>清理篮</small><strong>{selected.size ? `${selected.size} 项 · ${formatBytes(selectedBytes)}` : '尚未选择'}</strong></span>{selected.size > 0 && <b>{selected.size}</b>}</button>
+      </header>
+      <main className="content">
+        {page === 'overview' && <Overview disk={activeDisk} items={cleanupItems} records={operationRecords} lastScanAt={lastScanAt} scanning={scanning} onScan={runScan} onNavigate={setPage} />}
+        {page === 'cleanup' && <CleanupCenter items={cleanupItems} selected={selected} scanning={scanning} progress={progress} scanPath={scanPath} onScan={runScan} onToggle={toggleItem} onOpenBasket={() => setBasketOpen(true)} />}
+        {page === 'files' && <FileDiscovery largeFiles={discoveryFiles} duplicateGroups={discoveryDuplicates} scanStatus={fileScanStatus} scannedAt={fileScannedAt || undefined} onScan={(tab) => void runFileScan(tab)} onCancel={() => void cancelFileScan()} onRevealInExplorer={(path) => void reveal(path)} onAddExclusion={addExclusion} />}
+        {page === 'analysis' && <StorageAnalysis disk={activeDisk} directories={analysisDirectories} categories={analysisCategories} initialPath={activeDisk.mount} scanStatus={analysisScanStatus} scannedAt={analysisScannedAt || undefined} onScan={() => void runStorageScan()} onCancel={() => void cancelStorageScan()} onAnalyzeDirectory={(directory) => void runStorageScan(directory.path, true)} />}
+        {page === 'apps' && <AppManagement apps={installedApps} busyAppId={busyAppId} onRequestUninstall={(app) => void uninstall(app.id)} onClearCache={(app) => { setPage('cleanup'); setToast(`请在应用缓存中复核 ${app.name} 的可重建内容`); }} />}
+        {page === 'recovery' && <RecoveryCenter records={operationRecords} onRestore={(id) => setToast(`记录 ${id} 没有可直接覆盖恢复的内容`)} />}
+        {page === 'settings' && <SettingsPage protectedDirectories={protectedPaths.map((item) => item.path)} exclusionRules={[...builtInExclusionRules, ...userExclusions]} autoCleanupEnabled={false} theme={theme} setTheme={useAppStore.getState().setTheme} />}
+      </main>
+    </div>
+
+    {basketOpen && <BasketDrawer items={selectedItems} busy={executing} onClose={() => setBasketOpen(false)} onRemove={toggleItem} onExecute={() => setExecuteOpen(true)} />}
+    {executeOpen && <Dialog title="确认执行这份清理计划？" danger busy={executing} confirmLabel="复检并执行" onClose={() => setExecuteOpen(false)} onConfirm={runCleanup}><p>将处理 <strong>{selectedItems.length} 个规则类别</strong>，预计释放 <strong>{formatBytes(selectedBytes)}</strong>。只会删除本次扫描快照中未变化的文件。</p><div className="confirm-proof"><span><ShieldCheck /></span><div><strong>默认失败策略：跳过并保留</strong><small>文件已修改、路径变化、被占用或身份不符时不会强制删除。</small></div></div>{irreversibleCount > 0 && <div className="confirm-warning"><ShieldCheck /><span><strong>{irreversibleCount} 项不可恢复内容</strong><small>这些项目不是默认推荐项，请再次核对。</small></span></div>}</Dialog>}
+    {toast && <div className="toast" role="status"><ShieldCheck /><span>{toast}</span><button className="icon-button" onClick={() => setToast('')} aria-label="关闭提示"><X /></button></div>}
+  </div>;
+}
