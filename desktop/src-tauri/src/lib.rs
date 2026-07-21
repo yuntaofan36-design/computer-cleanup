@@ -1,6 +1,8 @@
 mod apps;
 mod audit;
+mod browsers;
 mod models;
+mod partitions;
 mod scanner;
 mod storage;
 
@@ -19,7 +21,7 @@ use sysinfo::Disks;
 use tauri::State;
 use uuid::Uuid;
 
-const CLEANUP_RULE_VERSION: &str = "cleanup-rules-v2";
+const CLEANUP_RULE_VERSION: &str = "cleanup-rules-v4";
 const MAX_CONCURRENT_READ_TASKS: usize = 3;
 
 #[derive(Default)]
@@ -106,6 +108,35 @@ fn scan_cleanup(state: State<AppState>) -> Vec<CleanupItem> {
     items
 }
 
+fn validate_irreversible_confirmations(
+    item_ids: &[String],
+    confirmed_irreversible_item_ids: &[String],
+    irreversible_item_ids: &[&str],
+) -> Result<(), String> {
+    let planned = item_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let confirmed = confirmed_irreversible_item_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let irreversible = irreversible_item_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    if confirmed.len() != confirmed_irreversible_item_ids.len()
+        || confirmed.iter().any(|id| !planned.contains(id))
+        || confirmed.iter().any(|id| !irreversible.contains(id))
+    {
+        return Err("不可恢复内容确认列表无效".into());
+    }
+    if irreversible_item_ids
+        .iter()
+        .any(|id| !confirmed.contains(id))
+    {
+        return Err("清理计划包含未明确确认的不可恢复内容".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn execute_cleanup(
     request: ExecuteRequest,
@@ -116,6 +147,24 @@ fn execute_cleanup(
     }
     if request.item_ids.is_empty() || request.item_ids.len() > 100 {
         return Err("清理计划必须包含 1 到 100 个规则条目".into());
+    }
+    {
+        let known = state.scanned.lock();
+        let irreversible_item_ids = request
+            .item_ids
+            .iter()
+            .filter(|id| {
+                known
+                    .get(*id)
+                    .is_some_and(|snapshot| matches!(&snapshot.item().risk, RiskLevel::High))
+            })
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        validate_irreversible_confirmations(
+            &request.item_ids,
+            &request.confirmed_irreversible_item_ids,
+            &irreversible_item_ids,
+        )?;
     }
 
     let mut record =
@@ -441,9 +490,13 @@ mod startup_platform {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             list_disks,
+            partitions::list_partition_disks,
+            partitions::open_windows_disk_management,
             scan_cleanup,
             execute_cleanup,
             list_operation_records,
@@ -460,4 +513,41 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Qingpan")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_irreversible_confirmations;
+
+    #[test]
+    fn irreversible_cleanup_requires_exact_explicit_confirmations() {
+        let item_ids = vec!["safe-cache".to_string(), "wechat-chat".to_string()];
+        let irreversible = vec!["wechat-chat"];
+
+        assert!(
+            validate_irreversible_confirmations(&item_ids, &[], &irreversible)
+                .expect_err("unconfirmed user data should be rejected")
+                .contains("未明确确认")
+        );
+        assert!(validate_irreversible_confirmations(
+            &item_ids,
+            &["outside-plan".to_string()],
+            &irreversible,
+        )
+        .expect_err("out-of-plan confirmation should be rejected")
+        .contains("确认列表无效"));
+        assert!(validate_irreversible_confirmations(
+            &item_ids,
+            &["safe-cache".to_string()],
+            &irreversible,
+        )
+        .expect_err("safe items must not be mislabeled as irreversible confirmations")
+        .contains("确认列表无效"));
+        assert!(validate_irreversible_confirmations(
+            &item_ids,
+            &["wechat-chat".to_string()],
+            &irreversible,
+        )
+        .is_ok());
+    }
 }

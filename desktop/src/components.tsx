@@ -28,13 +28,13 @@ export function Toggle({ checked, onChange, label }: { checked: boolean; onChang
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`toggle ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}><span /></button>;
 }
 
-export function Dialog({ title, children, confirmLabel = '确认', danger = false, busy = false, onClose, onConfirm }: {
-  title: string; children: ReactNode; confirmLabel?: string; danger?: boolean; busy?: boolean; onClose: () => void; onConfirm: () => void;
+export function Dialog({ title, children, confirmLabel = '确认', danger = false, busy = false, confirmDisabled = false, onClose, onConfirm }: {
+  title: string; children: ReactNode; confirmLabel?: string; danger?: boolean; busy?: boolean; confirmDisabled?: boolean; onClose: () => void; onConfirm: () => void;
 }) {
   return <div className="overlay" role="presentation" onMouseDown={onClose}><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" onMouseDown={(event) => event.stopPropagation()}>
     <button className="icon-button dialog-close" onClick={onClose} aria-label="关闭"><X /></button>
     <h2 id="dialog-title">{title}</h2><div className="dialog-body">{children}</div>
-    <div className="dialog-actions"><button className="button secondary" onClick={onClose}>取消</button><button className={`button ${danger ? 'danger' : 'primary'}`} disabled={busy} onClick={onConfirm}>{busy ? '正在复检…' : confirmLabel}</button></div>
+    <div className="dialog-actions"><button className="button secondary" onClick={onClose}>取消</button><button className={`button ${danger ? 'danger' : 'primary'}`} disabled={busy || confirmDisabled} onClick={onConfirm}>{busy ? '正在复检…' : confirmLabel}</button></div>
   </div></div>;
 }
 
@@ -51,7 +51,7 @@ export function BasketDrawer({ items, busy, onClose, onExecute, onRemove }: {
     <header><div><span className="drawer-kicker"><ShoppingBasket />清理篮</span><h2>{items.length ? `${items.length} 项待复检` : '还没有选择项目'}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭清理篮"><X /></button></header>
     {!items.length ? <EmptyState icon={<ShoppingBasket />} title="清理篮是空的" description="扫描后，只有高置信度的可清理项才能加入这里。" /> : <>
       <div className="basket-summary"><div><small>预计可释放</small><strong>{formatBytes(total)}</strong></div><span><ShieldCheck />执行前逐文件复检</span></div>
-      {reviewCount > 0 && <SafetyNotice tone="warning"><strong>{reviewCount} 项需要额外确认</strong><p>包含诊断记录或不可恢复内容，不会与低风险项目合并确认。</p></SafetyNotice>}
+      {reviewCount > 0 && <SafetyNotice tone="warning"><strong>{reviewCount} 项需要额外确认</strong><p>包含诊断记录或不可恢复内容，请在最终确认中逐项复核。</p></SafetyNotice>}
       <div className="basket-list">{items.map((item) => <div className="basket-item" key={item.id}><span className={`scope-mark ${item.scope}`} /> <div><strong>{item.name}</strong><small>{item.product} · {formatBytes(item.sizeBytes)}</small></div><button className="icon-button" onClick={() => onRemove(item.id)} aria-label={`移除 ${item.name}`}><X /></button></div>)}</div>
       <div className="basket-proof"><h3>执行时会再次确认</h3><ul><li>路径仍在规则白名单内</li><li>文件大小与修改时间未变化</li><li>不是符号链接、联接点或云占位文件</li><li>被应用锁定的文件会跳过</li></ul></div>
       <footer><div><small>预计释放</small><strong>{formatBytes(total)}</strong></div><button className="button primary wide" disabled={busy} onClick={onExecute}><Trash2 />{busy ? '正在安全复检' : '查看并执行计划'}<ChevronRight /></button></footer>

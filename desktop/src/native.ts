@@ -6,23 +6,26 @@ import {
   disks as previewDisks,
   duplicateGroups as previewDuplicateGroups,
   largeFiles as previewLargeFiles,
+  partitionDisks as previewPartitionDisks,
   records as previewOperationRecords,
   storageCategories as previewStorageCategories,
 } from './mockData';
 import type {
   AppEntry,
   CleanupItem,
+  CleanupScope,
   DiskInfo,
   DuplicateScanResult,
   ExecuteResult,
   LargeFileScanResult,
   OperationRecord,
+  PartitionDisk,
   ScanStats,
   StorageAnalysisResult,
   UninstallLaunchResult,
 } from './types';
 
-type NativeCleanupItem = Pick<CleanupItem, 'id' | 'category' | 'name' | 'path' | 'description' | 'sizeBytes' | 'risk' | 'deleteMode'>;
+type NativeCleanupItem = Pick<CleanupItem, 'id' | 'category' | 'name' | 'path' | 'description' | 'blockedReason' | 'sizeBytes' | 'risk' | 'deleteMode'>;
 type NativeAppEntry = Omit<AppEntry, 'cacheBytes' | 'lastUsed'>;
 
 const APP_ICON_DATA_URL_PREFIX = 'data:image/png;base64,';
@@ -117,22 +120,44 @@ const operationStatusMap: Record<NativeOperationStatus, OperationRecord['status'
 
 export const isNativeRuntime = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
+export function inferCleanupScope(categoryValue: string, nameValue: string): CleanupScope {
+  const category = categoryValue.toLowerCase();
+  const classification = `${category} ${nameValue.toLowerCase()}`;
+  if (
+    classification.includes('微信')
+    || classification.includes('wechat')
+    || classification.includes('weixin')
+    || classification.includes('xwechat')
+  ) return 'wechat';
+  if (
+    classification.includes('浏览器')
+    || classification.includes('edge')
+    || classification.includes('chrome')
+    || classification.includes('firefox')
+  ) return 'browser';
+  return category.includes('应用') ? 'apps' : 'system';
+}
+
 function normalizeCleanupItem(item: NativeCleanupItem): CleanupItem {
-  const category = item.category.toLowerCase();
-  const classification = `${category} ${item.name.toLowerCase()}`;
-  const scope = classification.includes('浏览器') || classification.includes('edge') || classification.includes('chrome') || classification.includes('firefox')
-    ? 'browser'
-    : category.includes('应用') ? 'apps' : 'system';
+  const scope = inferCleanupScope(item.category, item.name);
+  const isWechatUserData = scope === 'wechat' && item.risk === 'high';
+  const blocked = Boolean(item.blockedReason);
   return {
     ...item,
     scope,
-    product: scope === 'browser' ? item.name.replace(/缓存.*$/, '').trim() : scope === 'apps' ? item.name : 'Windows',
-    reason: item.description || '命中已签名的可重建缓存规则',
+    product: scope === 'browser'
+      ? item.name.split('·')[0]?.trim() || item.name
+      : scope === 'apps' ? item.name : scope === 'wechat' ? '微信' : 'Windows',
+    reason: item.blockedReason || (isWechatUserData
+      ? '命中微信文档根下的明确用户数据目录；默认不勾选，只有主动选择并确认后才会处理'
+      : scope === 'wechat'
+      ? '仅命中微信 AppData 下明确的缓存、日志或崩溃报告叶子目录，不进入聊天数据目录'
+      : item.description || '命中已签名的可重建缓存规则'),
     fileCount: 0,
     confidence: 'high',
-    impact: 'rebuild',
-    recoverability: 'rebuildable',
-    selectable: item.risk === 'low',
+    impact: isWechatUserData ? 'user_data' : 'rebuild',
+    recoverability: isWechatUserData ? 'irreversible' : 'rebuildable',
+    selectable: !blocked && (item.risk === 'low' || isWechatUserData),
   };
 }
 
@@ -213,18 +238,33 @@ export async function loadDisks(): Promise<DiskInfo[]> {
   return invoke<DiskInfo[]>('list_disks');
 }
 
+export async function loadPartitionDisks(): Promise<PartitionDisk[]> {
+  if (!isNativeRuntime()) return previewPartitionDisks;
+  return invoke<PartitionDisk[]>('list_partition_disks');
+}
+
+export async function openWindowsDiskManagement(): Promise<void> {
+  if (!isNativeRuntime()) throw new Error('浏览器预览不会启动 Windows 磁盘管理');
+  return invoke<void>('open_windows_disk_management');
+}
+
 export async function scanCleanup(): Promise<CleanupItem[]> {
   if (!isNativeRuntime()) return previewCleanupItems;
   const items = await invoke<NativeCleanupItem[]>('scan_cleanup');
   return items.map(normalizeCleanupItem);
 }
 
-export async function executeCleanup(itemIds: string[]): Promise<ExecuteResult> {
+export async function executeCleanup(
+  itemIds: string[],
+  confirmedIrreversibleItemIds: string[] = [],
+): Promise<ExecuteResult> {
   if (!isNativeRuntime()) {
     const reclaimedBytes = previewCleanupItems.filter((item) => itemIds.includes(item.id)).reduce((sum, item) => sum + item.sizeBytes, 0);
     return { reclaimedBytes, succeeded: itemIds.length, failed: [] };
   }
-  return invoke<ExecuteResult>('execute_cleanup', { request: { itemIds, confirmed: true } });
+  return invoke<ExecuteResult>('execute_cleanup', {
+    request: { itemIds, confirmed: true, confirmedIrreversibleItemIds },
+  });
 }
 
 export async function loadApps(): Promise<AppEntry[]> {

@@ -25,6 +25,12 @@
       "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8787 https:; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis", "msi"],

@@ -16,6 +16,8 @@ pub struct CleanupItem {
     pub name: String,
     pub path: String,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
     pub size_bytes: u64,
     pub risk: RiskLevel,
     pub delete_mode: DeleteMode,
@@ -38,6 +40,8 @@ pub enum DeleteMode {
 pub struct ExecuteRequest {
     pub item_ids: Vec<String>,
     pub confirmed: bool,
+    #[serde(default)]
+    pub confirmed_irreversible_item_ids: Vec<String>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,4 +1,7 @@
-use crate::models::{CleanupItem, DeleteMode, RiskLevel};
+use crate::{
+    browsers::{self, BrowserDataRoot, BrowserProcess},
+    models::{CleanupItem, DeleteMode, RiskLevel},
+};
 use std::{
     fs::{self, Metadata},
     path::{Path, PathBuf},
@@ -13,6 +16,31 @@ const REGENERABLE_CACHE_DIRECTORIES: [(&str, &str); 3] = [
     ("Code Cache", "code-cache"),
     ("GPUCache", "gpu-cache"),
 ];
+const WECHAT_INSTALLATIONS: [(&str, &str, &str); 3] = [
+    ("WeChat", "wechat", "微信"),
+    ("Weixin", "weixin", "微信 4.x"),
+    ("xwechat", "xwechat", "微信 4.x"),
+];
+const WECHAT_REGENERABLE_DIRECTORIES: [(&str, &str, &str, &str); 6] = [
+    ("Cache", "cache", "微信运行缓存", "网络缓存"),
+    ("Code Cache", "code-cache", "微信运行缓存", "代码缓存"),
+    ("GPUCache", "gpu-cache", "微信运行缓存", "图形缓存"),
+    ("Log", "log", "微信诊断数据", "运行日志"),
+    ("Logs", "logs", "微信诊断数据", "运行日志"),
+    (
+        "Crashpad/reports",
+        "crash-reports",
+        "微信诊断数据",
+        "崩溃报告",
+    ),
+];
+const WECHAT_ATTACHMENT_IMAGE_DIRECTORIES: &[&str] = &["Image", "Thumb"];
+const WECHAT_ATTACHMENT_VIDEO_DIRECTORIES: &[&str] = &["Video"];
+const WECHAT_ATTACHMENT_FILE_DIRECTORIES: &[&str] = &["File"];
+const WECHAT_ATTACHMENT_VOICE_DIRECTORIES: &[&str] = &["Audio", "Voice", "Voice2"];
+const XWECHAT_ATTACHMENT_IMAGE_DIRECTORIES: &[&str] = &["Img"];
+const XWECHAT_ATTACHMENT_VIDEO_DIRECTORIES: &[&str] = &["V"];
+const XWECHAT_ATTACHMENT_VOICE_DIRECTORIES: &[&str] = &["Audio", "Voice", "Voice2"];
 
 #[derive(Clone, Copy)]
 pub enum FileMatcher {
@@ -21,22 +49,26 @@ pub enum FileMatcher {
         prefix: &'static str,
         suffix: &'static str,
     },
+    DescendantDirectoryName {
+        names: &'static [&'static str],
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootBase {
     Local,
     Roaming,
+    WeChatDocuments,
+    XWeChatData,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProcessGuard {
-    Edge,
-    Chrome,
-    Firefox,
+    Browser(BrowserProcess),
     VsCode,
     Discord,
     Figma,
+    WeChat,
 }
 
 #[derive(Clone)]
@@ -112,6 +144,47 @@ fn cache_rule(
     }
 }
 
+fn wechat_rule(
+    id: impl Into<String>,
+    category: &'static str,
+    name: impl Into<String>,
+    base: RootBase,
+    relative: impl Into<PathBuf>,
+) -> Rule {
+    Rule {
+        id: id.into(),
+        category,
+        name: name.into(),
+        base,
+        relative: relative.into(),
+        risk: RiskLevel::Low,
+        matcher: FileMatcher::AllFilesRecursive,
+        minimum_age: None,
+        process_guard: Some(ProcessGuard::WeChat),
+    }
+}
+
+fn wechat_user_rule(
+    id: impl Into<String>,
+    category: &'static str,
+    name: impl Into<String>,
+    base: RootBase,
+    relative: impl Into<PathBuf>,
+    matcher: FileMatcher,
+) -> Rule {
+    Rule {
+        id: id.into(),
+        category,
+        name: name.into(),
+        base,
+        relative: relative.into(),
+        risk: RiskLevel::High,
+        matcher,
+        minimum_age: None,
+        process_guard: Some(ProcessGuard::WeChat),
+    }
+}
+
 fn stable_id_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len() * 2);
     for byte in value.as_bytes() {
@@ -143,60 +216,6 @@ fn child_directory_names(parent: &Path) -> Vec<String> {
     names
 }
 
-fn discover_chromium_rules(
-    rules: &mut Vec<Rule>,
-    local_root: &Path,
-    product_id: &'static str,
-    product_name: &'static str,
-    user_data_relative: &Path,
-    process_guard: ProcessGuard,
-) {
-    let user_data = local_root.join(user_data_relative);
-    for profile in child_directory_names(&user_data) {
-        if profile != "Default"
-            && !profile
-                .strip_prefix("Profile ")
-                .is_some_and(|suffix| !suffix.is_empty())
-        {
-            continue;
-        }
-
-        let profile_relative = user_data_relative.join(&profile);
-        let profile_id = stable_id_component(&profile);
-        for (cache_directory, cache_id) in REGENERABLE_CACHE_DIRECTORIES {
-            let relative = profile_relative.join(cache_directory);
-            if !trusted_directory(&local_root.join(&relative)) {
-                continue;
-            }
-            rules.push(cache_rule(
-                format!("{product_id}-profile-{profile_id}-{cache_id}"),
-                format!("{product_name} · {profile} · {cache_directory}"),
-                RootBase::Local,
-                relative,
-                Some(process_guard),
-            ));
-        }
-    }
-}
-
-fn discover_firefox_rules(rules: &mut Vec<Rule>, local_root: &Path) {
-    let profiles_relative = Path::new("Mozilla/Firefox/Profiles");
-    let profiles_root = local_root.join(profiles_relative);
-    for profile in child_directory_names(&profiles_root) {
-        let relative = profiles_relative.join(&profile).join("cache2");
-        if !trusted_directory(&local_root.join(&relative)) {
-            continue;
-        }
-        rules.push(cache_rule(
-            format!("firefox-profile-{}-cache2", stable_id_component(&profile)),
-            format!("Firefox · {profile} · cache2"),
-            RootBase::Local,
-            relative,
-            Some(ProcessGuard::Firefox),
-        ));
-    }
-}
-
 fn add_application_cache_rules(
     rules: &mut Vec<Rule>,
     product_id: &'static str,
@@ -215,7 +234,327 @@ fn add_application_cache_rules(
     }
 }
 
-fn rules_for_roots(local_root: Option<&Path>, _roaming_root: Option<&Path>) -> Vec<Rule> {
+fn add_wechat_rules(rules: &mut Vec<Rule>, base: RootBase, base_id: &'static str) {
+    for (installation, installation_id, product_name) in WECHAT_INSTALLATIONS {
+        let installation_relative = Path::new("Tencent").join(installation);
+        for (directory, directory_id, category, display_name) in WECHAT_REGENERABLE_DIRECTORIES {
+            rules.push(wechat_rule(
+                format!("wechat-{base_id}-{installation_id}-{directory_id}"),
+                category,
+                format!("{product_name} · {display_name}"),
+                base,
+                installation_relative.join(directory),
+            ));
+        }
+    }
+}
+
+fn add_wechat_user_directory_rule(
+    rules: &mut Vec<Rule>,
+    documents_root: &Path,
+    account: &str,
+    account_id: &str,
+    suffix: &'static str,
+    category: &'static str,
+    display_name: &'static str,
+    relative: PathBuf,
+) {
+    if !trusted_directory(&documents_root.join(&relative)) {
+        return;
+    }
+    rules.push(wechat_user_rule(
+        format!("wechat-user-{account_id}-{suffix}"),
+        category,
+        format!("微信 · {account} · {display_name}"),
+        RootBase::WeChatDocuments,
+        relative,
+        FileMatcher::AllFilesRecursive,
+    ));
+}
+
+fn msg_attach_has_directory(root: &Path, names: &[&str]) -> bool {
+    const MAX_DISCOVERY_DEPTH: usize = 6;
+    const MAX_DISCOVERED_DIRECTORIES: usize = 50_000;
+
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut discovered = 0usize;
+    while let Some((parent, depth)) = pending.pop() {
+        if depth >= MAX_DISCOVERY_DEPTH {
+            continue;
+        }
+        for child in child_directory_names(&parent) {
+            discovered += 1;
+            if discovered > MAX_DISCOVERED_DIRECTORIES {
+                return false;
+            }
+            if names.iter().any(|name| child.eq_ignore_ascii_case(name)) {
+                return true;
+            }
+            pending.push((parent.join(child), depth + 1));
+        }
+    }
+    false
+}
+
+fn add_wechat_attachment_rule(
+    rules: &mut Vec<Rule>,
+    documents_root: &Path,
+    account: &str,
+    account_id: &str,
+    suffix: &'static str,
+    category: &'static str,
+    display_name: &'static str,
+    relative: &Path,
+    directory_names: &'static [&'static str],
+) {
+    let root = documents_root.join(relative);
+    if !trusted_directory(&root) || !msg_attach_has_directory(&root, directory_names) {
+        return;
+    }
+    rules.push(wechat_user_rule(
+        format!("wechat-user-{account_id}-{suffix}"),
+        category,
+        format!("微信 · {account} · {display_name}"),
+        RootBase::WeChatDocuments,
+        relative,
+        FileMatcher::DescendantDirectoryName {
+            names: directory_names,
+        },
+    ));
+}
+
+fn discover_wechat_user_data_rules(rules: &mut Vec<Rule>, documents_root: &Path) {
+    let accounts_relative = Path::new("WeChat Files");
+    let accounts_root = documents_root.join(accounts_relative);
+    for account in child_directory_names(&accounts_root) {
+        if ["All Users", "Applet", "WMPF"]
+            .iter()
+            .any(|ignored| account.eq_ignore_ascii_case(ignored))
+        {
+            continue;
+        }
+
+        let account_relative = accounts_relative.join(&account);
+        let account_root = documents_root.join(&account_relative);
+        if !trusted_directory(&account_root.join("Msg"))
+            && !trusted_directory(&account_root.join("FileStorage"))
+        {
+            continue;
+        }
+        let account_id = stable_id_component(&account);
+
+        for (relative, suffix, category, display_name) in [
+            ("Msg", "chat-records", "微信聊天记录", "聊天记录"),
+            ("FileStorage/Image", "images", "微信图片", "聊天图片"),
+            ("FileStorage/Video", "videos", "微信视频", "聊天视频"),
+            ("FileStorage/File", "files", "微信文件", "聊天文件"),
+            ("FileStorage/Fav", "favorites", "微信收藏", "收藏内容"),
+            (
+                "FileStorage/CustomEmotion",
+                "emotions",
+                "微信表情",
+                "自定义表情",
+            ),
+            ("FileStorage/Audio", "audio", "微信语音", "语音消息"),
+            ("FileStorage/Voice", "voice", "微信语音", "语音消息"),
+            ("FileStorage/Voice2", "voice2", "微信语音", "语音消息"),
+        ] {
+            add_wechat_user_directory_rule(
+                rules,
+                documents_root,
+                &account,
+                &account_id,
+                suffix,
+                category,
+                display_name,
+                account_relative.join(relative),
+            );
+        }
+
+        let msg_attach_relative = account_relative.join("FileStorage/MsgAttach");
+        for (suffix, category, display_name, directory_names) in [
+            (
+                "attachment-images",
+                "微信图片",
+                "消息附件图片",
+                WECHAT_ATTACHMENT_IMAGE_DIRECTORIES,
+            ),
+            (
+                "attachment-videos",
+                "微信视频",
+                "消息附件视频",
+                WECHAT_ATTACHMENT_VIDEO_DIRECTORIES,
+            ),
+            (
+                "attachment-files",
+                "微信文件",
+                "消息附件文件",
+                WECHAT_ATTACHMENT_FILE_DIRECTORIES,
+            ),
+            (
+                "attachment-voices",
+                "微信语音",
+                "语音消息",
+                WECHAT_ATTACHMENT_VOICE_DIRECTORIES,
+            ),
+        ] {
+            add_wechat_attachment_rule(
+                rules,
+                documents_root,
+                &account,
+                &account_id,
+                suffix,
+                category,
+                display_name,
+                &msg_attach_relative,
+                directory_names,
+            );
+        }
+    }
+}
+
+fn add_xwechat_user_directory_rule(
+    rules: &mut Vec<Rule>,
+    data_root: &Path,
+    account: &str,
+    account_id: &str,
+    suffix: &'static str,
+    category: &'static str,
+    display_name: &'static str,
+    relative: PathBuf,
+) {
+    if !trusted_directory(&data_root.join(&relative)) {
+        return;
+    }
+    rules.push(wechat_user_rule(
+        format!("wechat-user-x-{account_id}-{suffix}"),
+        category,
+        format!("微信 4.x · {account} · {display_name}"),
+        RootBase::XWeChatData,
+        relative,
+        FileMatcher::AllFilesRecursive,
+    ));
+}
+
+fn add_xwechat_attachment_rule(
+    rules: &mut Vec<Rule>,
+    data_root: &Path,
+    account: &str,
+    account_id: &str,
+    suffix: &'static str,
+    category: &'static str,
+    display_name: &'static str,
+    relative: &Path,
+    directory_names: &'static [&'static str],
+) {
+    let root = data_root.join(relative);
+    if !trusted_directory(&root) || !msg_attach_has_directory(&root, directory_names) {
+        return;
+    }
+    rules.push(wechat_user_rule(
+        format!("wechat-user-x-{account_id}-{suffix}"),
+        category,
+        format!("微信 4.x · {account} · {display_name}"),
+        RootBase::XWeChatData,
+        relative,
+        FileMatcher::DescendantDirectoryName {
+            names: directory_names,
+        },
+    ));
+}
+
+fn discover_xwechat_user_data_rules(rules: &mut Vec<Rule>, data_root: &Path) {
+    let accounts_relative = Path::new("xwechat_files");
+    let accounts_root = data_root.join(accounts_relative);
+    for account in child_directory_names(&accounts_root) {
+        if account.eq_ignore_ascii_case("All Users") {
+            continue;
+        }
+
+        let account_relative = accounts_relative.join(&account);
+        let account_root = data_root.join(&account_relative);
+        if !trusted_directory(&account_root.join("db_storage"))
+            && !trusted_directory(&account_root.join("msg"))
+        {
+            continue;
+        }
+        let account_id = stable_id_component(&account);
+
+        for (relative, suffix, category, display_name) in [
+            (
+                "db_storage/message",
+                "chat-messages",
+                "微信聊天记录",
+                "聊天消息数据库",
+            ),
+            (
+                "db_storage/session",
+                "chat-sessions",
+                "微信聊天记录",
+                "会话索引",
+            ),
+            ("msg/file", "files", "微信文件", "聊天文件"),
+            ("msg/video", "videos", "微信视频", "聊天视频"),
+            ("db_storage/favorite", "favorites", "微信收藏", "收藏数据"),
+            ("db_storage/emoticon", "emotions", "微信表情", "表情数据"),
+            ("msg/audio", "audio", "微信语音", "语音消息"),
+            ("msg/voice", "voice", "微信语音", "语音消息"),
+            ("msg/voice2", "voice2", "微信语音", "语音消息"),
+        ] {
+            add_xwechat_user_directory_rule(
+                rules,
+                data_root,
+                &account,
+                &account_id,
+                suffix,
+                category,
+                display_name,
+                account_relative.join(relative),
+            );
+        }
+
+        let attach_relative = account_relative.join("msg/attach");
+        for (suffix, category, display_name, directory_names) in [
+            (
+                "attachment-images",
+                "微信图片",
+                "消息附件图片",
+                XWECHAT_ATTACHMENT_IMAGE_DIRECTORIES,
+            ),
+            (
+                "attachment-videos",
+                "微信视频",
+                "消息附件视频",
+                XWECHAT_ATTACHMENT_VIDEO_DIRECTORIES,
+            ),
+            (
+                "attachment-voices",
+                "微信语音",
+                "语音消息",
+                XWECHAT_ATTACHMENT_VOICE_DIRECTORIES,
+            ),
+        ] {
+            add_xwechat_attachment_rule(
+                rules,
+                data_root,
+                &account,
+                &account_id,
+                suffix,
+                category,
+                display_name,
+                &attach_relative,
+                directory_names,
+            );
+        }
+    }
+}
+
+fn rules_for_roots(
+    local_root: Option<&Path>,
+    roaming_root: Option<&Path>,
+    wechat_documents_root: Option<&Path>,
+    xwechat_data_root: Option<&Path>,
+) -> Vec<Rule> {
     let mut rules = vec![
         Rule {
             id: "temp".into(),
@@ -265,25 +604,30 @@ fn rules_for_roots(local_root: Option<&Path>, _roaming_root: Option<&Path>) -> V
         Path::new("Figma"),
         ProcessGuard::Figma,
     );
+    add_wechat_rules(&mut rules, RootBase::Local, "local");
+    add_wechat_rules(&mut rules, RootBase::Roaming, "roaming");
+    if let Some(documents_root) = wechat_documents_root {
+        discover_wechat_user_data_rules(&mut rules, documents_root);
+    }
+    if let Some(data_root) = xwechat_data_root {
+        discover_xwechat_user_data_rules(&mut rules, data_root);
+    }
 
-    if let Some(local_root) = local_root {
-        discover_chromium_rules(
-            &mut rules,
-            local_root,
-            "edge",
-            "Microsoft Edge",
-            Path::new("Microsoft/Edge/User Data"),
-            ProcessGuard::Edge,
-        );
-        discover_chromium_rules(
-            &mut rules,
-            local_root,
-            "chrome",
-            "Google Chrome",
-            Path::new("Google/Chrome/User Data"),
-            ProcessGuard::Chrome,
-        );
-        discover_firefox_rules(&mut rules, local_root);
+    for browser_rule in browsers::discover_cache_rules(local_root, roaming_root) {
+        rules.push(Rule {
+            id: browser_rule.id,
+            category: "浏览器缓存",
+            name: browser_rule.name,
+            base: match browser_rule.base {
+                BrowserDataRoot::Local => RootBase::Local,
+                BrowserDataRoot::Roaming => RootBase::Roaming,
+            },
+            relative: browser_rule.relative,
+            risk: RiskLevel::Low,
+            matcher: FileMatcher::AllFilesRecursive,
+            minimum_age: None,
+            process_guard: Some(ProcessGuard::Browser(browser_rule.process)),
+        });
     }
 
     rules
@@ -292,7 +636,14 @@ fn rules_for_roots(local_root: Option<&Path>, _roaming_root: Option<&Path>) -> V
 pub fn rules() -> Vec<Rule> {
     let local_root = local_root();
     let roaming_root = roaming_root();
-    rules_for_roots(local_root.as_deref(), roaming_root.as_deref())
+    let wechat_documents_root = wechat_documents_root();
+    let xwechat_data_root = xwechat_data_root();
+    rules_for_roots(
+        local_root.as_deref(),
+        roaming_root.as_deref(),
+        wechat_documents_root.as_deref(),
+        xwechat_data_root.as_deref(),
+    )
 }
 
 pub fn local_root() -> Option<PathBuf> {
@@ -303,43 +654,186 @@ pub fn roaming_root() -> Option<PathBuf> {
     dirs::data_dir()
 }
 
+fn configured_wechat_documents_root(content: &str, default_root: &Path) -> PathBuf {
+    let configured = content.lines().find_map(|line| {
+        line.trim_start_matches('\u{feff}')
+            .strip_prefix("MyDocument:")
+            .map(str::trim)
+    });
+    let Some(configured) = configured.filter(|value| !value.is_empty()) else {
+        return default_root.to_path_buf();
+    };
+    if configured.len() > 32_767 {
+        return default_root.to_path_buf();
+    }
+
+    let configured = PathBuf::from(configured);
+    if !configured.is_absolute() {
+        return default_root.to_path_buf();
+    }
+    if configured
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("WeChat Files"))
+    {
+        return configured
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| default_root.to_path_buf());
+    }
+    configured
+}
+
+fn wechat_documents_root_for(
+    roaming_root: Option<&Path>,
+    default_documents_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let default_root = default_documents_root?;
+    let Some(roaming_root) = roaming_root else {
+        return Some(default_root.to_path_buf());
+    };
+    let config_path = roaming_root.join("Tencent/WeChat/All Users/config/3ebffe94.ini");
+    let Ok(bytes) = fs::read(config_path) else {
+        return Some(default_root.to_path_buf());
+    };
+    if bytes.len() > 64 * 1024 {
+        return Some(default_root.to_path_buf());
+    }
+    let content = String::from_utf8_lossy(&bytes);
+    Some(configured_wechat_documents_root(&content, default_root))
+}
+
+pub fn wechat_documents_root() -> Option<PathBuf> {
+    let roaming_root = roaming_root();
+    let default_documents_root = dirs::document_dir();
+    wechat_documents_root_for(roaming_root.as_deref(), default_documents_root.as_deref())
+}
+
+fn xwechat_data_root_for(
+    roaming_root: Option<&Path>,
+    default_home_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let default_root = default_home_root?;
+    let Some(roaming_root) = roaming_root else {
+        return Some(default_root.to_path_buf());
+    };
+    let config_root = roaming_root.join("Tencent/xwechat/config");
+    if !trusted_directory(&config_root) {
+        return Some(default_root.to_path_buf());
+    }
+    let mut candidates = fs::read_dir(config_root)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            if is_link_or_reparse(&metadata) || !metadata.is_file() || metadata.len() > 4096 {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?;
+            if path.extension()?.to_str()?.eq_ignore_ascii_case("ini")
+                && stem.len() == 32
+                && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    for path in candidates {
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        let value = String::from_utf8_lossy(&bytes);
+        let value = value.trim().trim_start_matches('\u{feff}');
+        if value.is_empty() || value.len() > 32_767 || value.contains('\0') {
+            continue;
+        }
+        let configured = PathBuf::from(value);
+        if !configured.is_absolute() {
+            continue;
+        }
+        let data_root = if configured
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("xwechat_files"))
+        {
+            let Some(parent) = configured.parent() else {
+                continue;
+            };
+            parent.to_path_buf()
+        } else {
+            configured
+        };
+        if trusted_directory(&data_root.join("xwechat_files")) {
+            return Some(data_root);
+        }
+    }
+    Some(default_root.to_path_buf())
+}
+
+pub fn xwechat_data_root() -> Option<PathBuf> {
+    let roaming_root = roaming_root();
+    let home_root = dirs::home_dir();
+    xwechat_data_root_for(roaming_root.as_deref(), home_root.as_deref())
+}
+
 fn base_root_for<'a>(
     rule: &Rule,
     local_root: Option<&'a Path>,
     roaming_root: Option<&'a Path>,
+    wechat_documents_root: Option<&'a Path>,
+    xwechat_data_root: Option<&'a Path>,
 ) -> Option<&'a Path> {
     match rule.base {
         RootBase::Local => local_root,
         RootBase::Roaming => roaming_root,
+        RootBase::WeChatDocuments => wechat_documents_root,
+        RootBase::XWeChatData => xwechat_data_root,
     }
 }
 
 pub fn path_for(rule: &Rule) -> Option<PathBuf> {
     let local_root = local_root();
     let roaming_root = roaming_root();
-    let root = base_root_for(rule, local_root.as_deref(), roaming_root.as_deref())?;
+    let wechat_documents_root = wechat_documents_root();
+    let xwechat_data_root = xwechat_data_root();
+    let root = base_root_for(
+        rule,
+        local_root.as_deref(),
+        roaming_root.as_deref(),
+        wechat_documents_root.as_deref(),
+        xwechat_data_root.as_deref(),
+    )?;
     Some(root.join(&rule.relative))
 }
 
 fn guarded_process_names(guard: ProcessGuard) -> &'static [&'static str] {
     match guard {
-        ProcessGuard::Edge => &["msedge.exe", "msedge"],
-        ProcessGuard::Chrome => &["chrome.exe", "chrome"],
-        ProcessGuard::Firefox => &["firefox.exe", "firefox"],
+        ProcessGuard::Browser(browser) => browser.names(),
         ProcessGuard::VsCode => &["code.exe", "code", "code-insiders.exe", "code-insiders"],
         ProcessGuard::Discord => &["discord.exe", "discord"],
         ProcessGuard::Figma => &["figma.exe", "figma"],
+        ProcessGuard::WeChat => &[
+            "wechat.exe",
+            "wechat",
+            "wechatappex.exe",
+            "wechatappex",
+            "weixin.exe",
+            "weixin",
+            "weixinappex.exe",
+            "weixinappex",
+        ],
     }
 }
 
 fn process_guard_name(guard: ProcessGuard) -> &'static str {
     match guard {
-        ProcessGuard::Edge => "Microsoft Edge",
-        ProcessGuard::Chrome => "Google Chrome",
-        ProcessGuard::Firefox => "Firefox",
+        ProcessGuard::Browser(browser) => browser.display_name(),
         ProcessGuard::VsCode => "Visual Studio Code",
         ProcessGuard::Discord => "Discord",
         ProcessGuard::Figma => "Figma",
+        ProcessGuard::WeChat => "微信",
     }
 }
 
@@ -360,12 +854,33 @@ fn process_guard_blocks(guard: ProcessGuard, process_names: &[String]) -> bool {
     })
 }
 
+fn process_guard_error(rule: &Rule, process_names: Option<&[String]>) -> Option<String> {
+    let guard = rule.process_guard?;
+    let Some(process_names) = process_names else {
+        return Some(format!(
+            "无法确认 {} 的运行状态；为避免误清理正在使用的数据，本次已安全跳过",
+            process_guard_name(guard)
+        ));
+    };
+    process_guard_blocks(guard, process_names).then(|| {
+        format!(
+            "检测到 {} 正在运行；为避免误清理正在使用的数据，本次已安全跳过",
+            process_guard_name(guard)
+        )
+    })
+}
+
 fn rule_is_executable(rule: &Rule, process_names: Option<&[String]>) -> bool {
     match (rule.process_guard, process_names) {
         (None, _) => true,
         (Some(guard), Some(process_names)) => !process_guard_blocks(guard, process_names),
         (Some(_), None) => false,
     }
+}
+
+fn rule_can_be_scanned(rule: &Rule, process_names: Option<&[String]>) -> bool {
+    matches!(rule.process_guard, Some(ProcessGuard::Browser(_)))
+        || rule_is_executable(rule, process_names)
 }
 
 fn running_process_names() -> Option<Vec<String>> {
@@ -446,6 +961,17 @@ fn matches_rule(
                 && file_name.starts_with(prefix)
                 && file_name.ends_with(suffix)
         }
+        FileMatcher::DescendantDirectoryName { names } => path
+            .components()
+            .rev()
+            .skip(1)
+            .take(depth.saturating_sub(1))
+            .any(|component| {
+                let component = component.as_os_str().to_string_lossy();
+                names
+                    .iter()
+                    .any(|name| component.eq_ignore_ascii_case(name))
+            }),
     }
 }
 
@@ -521,54 +1047,83 @@ fn snapshot_directory(
 fn scan_with_environment(
     local_root: Option<&Path>,
     roaming_root: Option<&Path>,
+    wechat_documents_root: Option<&Path>,
+    xwechat_data_root: Option<&Path>,
     process_names: Option<&[String]>,
 ) -> Vec<CleanupSnapshot> {
     let scan_started_at = SystemTime::now();
 
-    rules_for_roots(local_root, roaming_root)
-        .into_iter()
-        .filter(|rule| rule_is_executable(rule, process_names))
-        .filter_map(|rule| {
-            let base_root = base_root_for(&rule, local_root, roaming_root)?;
-            let canonical_base_root = fs::canonicalize(base_root).ok()?;
-            let root = base_root.join(&rule.relative);
-            validate_rule_directory_chain(base_root, &root).ok()?;
-            let directory = snapshot_directory(&root, &rule, scan_started_at).ok()?;
-            if directory.canonical_root == canonical_base_root
-                || !directory.canonical_root.starts_with(&canonical_base_root)
-            {
-                return None;
-            }
+    rules_for_roots(
+        local_root,
+        roaming_root,
+        wechat_documents_root,
+        xwechat_data_root,
+    )
+    .into_iter()
+    .filter(|rule| rule_can_be_scanned(rule, process_names))
+    .filter_map(|rule| {
+        let base_root = base_root_for(
+            &rule,
+            local_root,
+            roaming_root,
+            wechat_documents_root,
+            xwechat_data_root,
+        )?;
+        let canonical_base_root = fs::canonicalize(base_root).ok()?;
+        let root = base_root.join(&rule.relative);
+        validate_rule_directory_chain(base_root, &root).ok()?;
+        let directory = snapshot_directory(&root, &rule, scan_started_at).ok()?;
+        if directory.canonical_root == canonical_base_root
+            || !directory.canonical_root.starts_with(&canonical_base_root)
+        {
+            return None;
+        }
 
-            let size_bytes = directory.files.iter().map(|file| file.size).sum();
-            let item = CleanupItem {
-                id: rule.id,
-                category: rule.category.into(),
-                name: rule.name,
-                path: directory.root.display().to_string(),
-                description: "可由应用或 Windows 自动重新生成".into(),
-                size_bytes,
-                risk: rule.risk,
-                delete_mode: DeleteMode::Permanent,
-            };
+        let size_bytes = directory.files.iter().map(|file| file.size).sum();
+        let is_user_data = matches!(&rule.risk, RiskLevel::High);
+        if is_user_data && directory.files.is_empty() {
+            return None;
+        }
+        let blocked_reason = matches!(rule.process_guard, Some(ProcessGuard::Browser(_)))
+            .then(|| process_guard_error(&rule, process_names))
+            .flatten();
+        let item = CleanupItem {
+            id: rule.id,
+            category: rule.category.into(),
+            name: rule.name,
+            path: directory.root.display().to_string(),
+            description: if is_user_data {
+                "微信用户数据；只有主动选择并确认后才会永久删除".into()
+            } else {
+                "可由应用或 Windows 自动重新生成".into()
+            },
+            blocked_reason,
+            size_bytes,
+            risk: rule.risk,
+            delete_mode: DeleteMode::Permanent,
+        };
 
-            Some(CleanupSnapshot {
-                item,
-                root: directory.root,
-                canonical_root: directory.canonical_root,
-                files: directory.files,
-            })
+        Some(CleanupSnapshot {
+            item,
+            root: directory.root,
+            canonical_root: directory.canonical_root,
+            files: directory.files,
         })
-        .collect()
+    })
+    .collect()
 }
 
 pub fn scan() -> Vec<CleanupSnapshot> {
     let local_root = local_root();
     let roaming_root = roaming_root();
+    let wechat_documents_root = wechat_documents_root();
+    let xwechat_data_root = xwechat_data_root();
     let process_names = running_process_names();
     scan_with_environment(
         local_root.as_deref(),
         roaming_root.as_deref(),
+        wechat_documents_root.as_deref(),
+        xwechat_data_root.as_deref(),
         process_names.as_deref(),
     )
 }
@@ -594,8 +1149,16 @@ fn validated_snapshot_root(snapshot: &CleanupSnapshot, rule: &Rule) -> Result<Pa
 
     let local_root = local_root();
     let roaming_root = roaming_root();
-    let base_root = base_root_for(rule, local_root.as_deref(), roaming_root.as_deref())
-        .ok_or_else(|| "无法定位用户缓存目录".to_string())?;
+    let wechat_documents_root = wechat_documents_root();
+    let xwechat_data_root = xwechat_data_root();
+    let base_root = base_root_for(
+        rule,
+        local_root.as_deref(),
+        roaming_root.as_deref(),
+        wechat_documents_root.as_deref(),
+        xwechat_data_root.as_deref(),
+    )
+    .ok_or_else(|| "无法定位用户缓存目录".to_string())?;
     validate_rule_directory_chain(base_root, &snapshot.root)?;
     let canonical_base_root =
         fs::canonicalize(base_root).map_err(|error| format!("无法验证用户缓存目录: {error}"))?;
@@ -725,28 +1288,14 @@ pub fn execute(snapshot: &CleanupSnapshot) -> DeleteOutcome {
         }
     };
 
-    if let Some(guard) = rule.process_guard {
-        let Some(process_names) = running_process_names() else {
+    if rule.process_guard.is_some() {
+        let process_names = running_process_names();
+        if let Some(error) = process_guard_error(&rule, process_names.as_deref()) {
             return DeleteOutcome {
                 reclaimed_bytes: 0,
                 failures: vec![DeleteFailure {
                     path: snapshot.root.clone(),
-                    error: format!(
-                        "无法确认 {} 的运行状态；为避免误清理活跃缓存，本次已安全跳过",
-                        process_guard_name(guard)
-                    ),
-                }],
-            };
-        };
-        if process_guard_blocks(guard, &process_names) {
-            return DeleteOutcome {
-                reclaimed_bytes: 0,
-                failures: vec![DeleteFailure {
-                    path: snapshot.root.clone(),
-                    error: format!(
-                        "检测到 {} 正在运行；为避免清理活跃缓存，本次已安全跳过",
-                        process_guard_name(guard)
-                    ),
+                    error,
                 }],
             };
         }
@@ -843,6 +1392,7 @@ mod tests {
                 name: "test".into(),
                 path: root.display().to_string(),
                 description: String::new(),
+                blocked_reason: None,
                 size_bytes: directory.files.iter().map(|file| file.size).sum(),
                 risk: RiskLevel::Low,
                 delete_mode: DeleteMode::Permanent,
@@ -889,10 +1439,272 @@ mod tests {
     }
 
     #[test]
-    fn rules_are_not_high_risk() {
-        assert!(rules()
+    fn only_explicit_wechat_user_data_rules_are_high_risk() {
+        assert!(rules().iter().all(|rule| {
+            !matches!(&rule.risk, RiskLevel::High)
+                || (rule.id.starts_with("wechat-user-")
+                    && matches!(rule.base, RootBase::WeChatDocuments | RootBase::XWeChatData)
+                    && rule.process_guard == Some(ProcessGuard::WeChat))
+        }))
+    }
+
+    #[test]
+    fn wechat_documents_config_supports_default_and_absolute_custom_roots() {
+        let directory = TestDirectory::new();
+        let default_root = directory.path().join("Documents");
+        let custom_root = directory.path().join("Custom WeChat Data");
+        let custom_with_leaf = custom_root.join("WeChat Files");
+
+        assert_eq!(
+            configured_wechat_documents_root("MyDocument:", &default_root),
+            default_root
+        );
+        assert_eq!(
+            configured_wechat_documents_root(
+                &format!("MyDocument:{}", custom_root.display()),
+                &default_root,
+            ),
+            custom_root
+        );
+        assert_eq!(
+            configured_wechat_documents_root(
+                &format!("MyDocument:{}", custom_with_leaf.display()),
+                &default_root,
+            ),
+            custom_with_leaf
+                .parent()
+                .expect("custom root should have a parent")
+        );
+        assert_eq!(
+            configured_wechat_documents_root("MyDocument:relative/path", &default_root),
+            default_root
+        );
+    }
+
+    #[test]
+    fn xwechat_config_supports_an_absolute_data_root() {
+        let directory = TestDirectory::new();
+        let roaming = directory.path().join("Roaming");
+        let default_home = directory.path().join("Home");
+        let configured = directory.path().join("Configured Home");
+        let config_root = roaming.join("Tencent/xwechat/config");
+        create_directory(&config_root, "");
+        create_directory(&configured, "xwechat_files");
+        fs::write(
+            config_root.join("51a1fffea11325a1e4104c6b3de47af7.ini"),
+            configured.display().to_string(),
+        )
+        .expect("xwechat path config should be written");
+        fs::write(config_root.join("untrusted.ini"), b"C:\\wrong")
+            .expect("untrusted config fixture should be written");
+
+        assert_eq!(
+            xwechat_data_root_for(Some(&roaming), Some(&default_home)),
+            Some(configured)
+        );
+        assert_eq!(
+            xwechat_data_root_for(None, Some(&default_home)),
+            Some(default_home)
+        );
+    }
+
+    #[test]
+    fn wechat_user_data_scan_classifies_explicit_directories_and_skips_unknown_data() {
+        use std::collections::BTreeSet;
+
+        let directory = TestDirectory::new();
+        let documents = directory.path().join("Documents");
+        let account = documents.join("WeChat Files/account-test");
+        for (relative, content) in [
+            ("Msg/message.db", b"message".as_slice()),
+            ("FileStorage/Image/2026-07/image.dat", b"image".as_slice()),
+            ("FileStorage/Video/2026-07/video.mp4", b"video".as_slice()),
+            ("FileStorage/File/2026-07/file.zip", b"file".as_slice()),
+            ("FileStorage/Fav/favorite.dat", b"favorite".as_slice()),
+            (
+                "FileStorage/CustomEmotion/emotion.dat",
+                b"emotion".as_slice(),
+            ),
+            (
+                "FileStorage/MsgAttach/contact/Image/2026-07/attachment.dat",
+                b"attachment-image".as_slice(),
+            ),
+            (
+                "FileStorage/MsgAttach/contact/Audio/2026-07/voice.dat",
+                b"voice".as_slice(),
+            ),
+            (
+                "FileStorage/MsgAttach/contact/Unknown/keep.dat",
+                b"must-keep".as_slice(),
+            ),
+            ("FileStorage/Temp/keep.tmp", b"must-keep".as_slice()),
+            ("FileStorage/General/keep.dat", b"must-keep".as_slice()),
+        ] {
+            let path = account.join(relative);
+            create_directory(
+                path.parent().expect("fixture file should have a parent"),
+                "",
+            );
+            fs::write(path, content).expect("fixture file should be written");
+        }
+
+        let rules = rules_for_roots(None, None, Some(&documents), None);
+        let user_rules = rules
             .iter()
-            .all(|rule| !matches!(rule.risk, RiskLevel::High)))
+            .filter(|rule| rule.id.starts_with("wechat-user-"))
+            .collect::<Vec<_>>();
+        assert_eq!(user_rules.len(), 8);
+        assert!(user_rules.iter().all(|rule| {
+            matches!(&rule.risk, RiskLevel::High)
+                && rule.base == RootBase::WeChatDocuments
+                && rule.relative.starts_with("WeChat Files/account-test")
+        }));
+        assert!(user_rules.iter().all(|rule| {
+            !rule.relative.components().any(|component| {
+                ["Temp", "General"]
+                    .iter()
+                    .any(|name| component.as_os_str().eq_ignore_ascii_case(name))
+            })
+        }));
+
+        let closed = Vec::<String>::new();
+        let snapshots = scan_with_environment(None, None, Some(&documents), None, Some(&closed));
+        let categories = snapshots
+            .iter()
+            .map(|snapshot| snapshot.item.category.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            categories,
+            BTreeSet::from([
+                "微信聊天记录",
+                "微信图片",
+                "微信视频",
+                "微信文件",
+                "微信语音",
+                "微信收藏",
+                "微信表情",
+            ])
+        );
+        assert!(snapshots.iter().all(|snapshot| {
+            matches!(&snapshot.item.risk, RiskLevel::High) && !snapshot.files.is_empty()
+        }));
+        assert!(snapshots
+            .iter()
+            .flat_map(|snapshot| &snapshot.files)
+            .all(|file| {
+                file.path
+                    .strip_prefix(&account)
+                    .expect("snapshot should stay under the account root")
+                    .components()
+                    .all(|component| {
+                        !["Unknown", "Temp", "General"].iter().any(|name| {
+                            component
+                                .as_os_str()
+                                .to_string_lossy()
+                                .eq_ignore_ascii_case(name)
+                        })
+                    })
+            }));
+
+        let running = vec!["WeChat.exe".to_string()];
+        assert!(
+            scan_with_environment(None, None, Some(&documents), None, Some(&running)).is_empty()
+        );
+    }
+
+    #[test]
+    fn xwechat_user_data_scan_classifies_only_known_new_client_directories() {
+        use std::collections::BTreeSet;
+
+        let directory = TestDirectory::new();
+        let data_root = directory.path().join("Home");
+        let account = data_root.join("xwechat_files/account-new");
+        for (relative, content) in [
+            ("db_storage/message/message.db", b"message".as_slice()),
+            ("db_storage/session/session.db", b"session".as_slice()),
+            ("db_storage/favorite/favorite.db", b"favorite".as_slice()),
+            ("db_storage/emoticon/emoticon.db", b"emoticon".as_slice()),
+            ("msg/file/document.pdf", b"file".as_slice()),
+            ("msg/video/video.mp4", b"video".as_slice()),
+            (
+                "msg/attach/contact/2026-07/Img/image.dat",
+                b"image".as_slice(),
+            ),
+            (
+                "msg/attach/contact/2026-07/Rec/item/V/video.mp4",
+                b"attachment-video".as_slice(),
+            ),
+            (
+                "msg/attach/contact/2026-07/Audio/voice.dat",
+                b"voice".as_slice(),
+            ),
+            (
+                "msg/attach/contact/2026-07/Unknown/keep.dat",
+                b"must-keep".as_slice(),
+            ),
+            ("cache/keep.dat", b"must-keep".as_slice()),
+            ("temp/keep.dat", b"must-keep".as_slice()),
+        ] {
+            let path = account.join(relative);
+            create_directory(
+                path.parent().expect("fixture file should have a parent"),
+                "",
+            );
+            fs::write(path, content).expect("fixture file should be written");
+        }
+
+        let rules = rules_for_roots(None, None, None, Some(&data_root));
+        let user_rules = rules
+            .iter()
+            .filter(|rule| rule.id.starts_with("wechat-user-x-"))
+            .collect::<Vec<_>>();
+        assert_eq!(user_rules.len(), 9);
+        assert!(user_rules.iter().all(|rule| {
+            matches!(&rule.risk, RiskLevel::High)
+                && rule.base == RootBase::XWeChatData
+                && rule.relative.starts_with("xwechat_files/account-new")
+        }));
+
+        let closed = Vec::<String>::new();
+        let snapshots = scan_with_environment(None, None, None, Some(&data_root), Some(&closed));
+        let categories = snapshots
+            .iter()
+            .map(|snapshot| snapshot.item.category.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            categories,
+            BTreeSet::from([
+                "微信聊天记录",
+                "微信图片",
+                "微信视频",
+                "微信文件",
+                "微信语音",
+                "微信收藏",
+                "微信表情",
+            ])
+        );
+        assert!(snapshots
+            .iter()
+            .flat_map(|snapshot| &snapshot.files)
+            .all(|file| {
+                file.path
+                    .strip_prefix(&account)
+                    .expect("snapshot should stay under the xwechat account root")
+                    .components()
+                    .all(|component| {
+                        !["Unknown", "cache", "temp"].iter().any(|name| {
+                            component
+                                .as_os_str()
+                                .to_string_lossy()
+                                .eq_ignore_ascii_case(name)
+                        })
+                    })
+            }));
+
+        let running = vec!["Weixin.exe".to_string()];
+        assert!(
+            scan_with_environment(None, None, None, Some(&data_root), Some(&running)).is_empty()
+        );
     }
 
     #[test]
@@ -904,6 +1716,8 @@ mod tests {
         let roaming = directory.path().join("Roaming");
         create_directory(&local, Path::new("Microsoft/Edge/User Data"));
         create_directory(&local, Path::new("Google/Chrome/User Data"));
+        create_directory(&local, Path::new("Vivaldi/User Data"));
+        create_directory(&local, Path::new("Opera Software/Opera GX Stable"));
         create_directory(&local, Path::new("Mozilla/Firefox/Profiles"));
         create_directory(&roaming, Path::new("placeholder"));
 
@@ -919,6 +1733,17 @@ mod tests {
             create_profile_data(&chrome_user_data, profile);
         }
 
+        create_profile_data(&local.join("Vivaldi/User Data"), "Default");
+        for (cache_directory, _) in REGENERABLE_CACHE_DIRECTORIES {
+            let opera_root = local.join("Opera Software/Opera GX Stable");
+            create_directory(&opera_root, cache_directory);
+            fs::write(
+                opera_root.join(cache_directory).join("cache-entry"),
+                b"regenerable",
+            )
+            .expect("Opera GX cache entry should be written");
+        }
+
         for profile in ["alpha.default-release", "beta.work"] {
             let profile_root = local.join("Mozilla/Firefox/Profiles").join(profile);
             create_directory(&profile_root, "cache2");
@@ -929,17 +1754,10 @@ mod tests {
                 .expect("Firefox protected data should be written");
         }
 
-        let discovered = rules_for_roots(Some(&local), Some(&roaming));
+        let discovered = rules_for_roots(Some(&local), Some(&roaming), None, None);
         let browser_rules = discovered
             .iter()
-            .filter(|rule| {
-                matches!(
-                    rule.process_guard,
-                    Some(ProcessGuard::Edge)
-                        | Some(ProcessGuard::Chrome)
-                        | Some(ProcessGuard::Firefox)
-                )
-            })
+            .filter(|rule| matches!(rule.process_guard, Some(ProcessGuard::Browser(_))))
             .collect::<Vec<_>>();
         let actual = browser_rules
             .iter()
@@ -965,6 +1783,14 @@ mod tests {
                 );
             }
         }
+        for (cache_directory, _) in REGENERABLE_CACHE_DIRECTORIES {
+            expected.insert(
+                Path::new("Vivaldi/User Data")
+                    .join("Default")
+                    .join(cache_directory),
+            );
+            expected.insert(Path::new("Opera Software/Opera GX Stable").join(cache_directory));
+        }
         for profile in ["alpha.default-release", "beta.work"] {
             expected.insert(
                 Path::new("Mozilla/Firefox/Profiles")
@@ -979,16 +1805,9 @@ mod tests {
             .map(|rule| rule.id.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(ids.len(), browser_rules.len());
-        let repeated_ids = rules_for_roots(Some(&local), Some(&roaming))
+        let repeated_ids = rules_for_roots(Some(&local), Some(&roaming), None, None)
             .into_iter()
-            .filter(|rule| {
-                matches!(
-                    rule.process_guard,
-                    Some(ProcessGuard::Edge)
-                        | Some(ProcessGuard::Chrome)
-                        | Some(ProcessGuard::Firefox)
-                )
-            })
+            .filter(|rule| matches!(rule.process_guard, Some(ProcessGuard::Browser(_))))
             .map(|rule| rule.id)
             .collect::<BTreeSet<_>>();
         assert_eq!(
@@ -1015,10 +1834,37 @@ mod tests {
     }
 
     #[test]
+    fn running_browser_is_scanned_read_only_and_marked_unavailable() {
+        let directory = TestDirectory::new();
+        let local = directory.path().join("Local");
+        let roaming = directory.path().join("Roaming");
+        create_directory(&local, Path::new("Google/Chrome/User Data"));
+        create_directory(&roaming, Path::new("placeholder"));
+        create_profile_data(&local.join("Google/Chrome/User Data"), "Default");
+
+        let running = vec!["chrome.exe".to_string()];
+        let snapshots =
+            scan_with_environment(Some(&local), Some(&roaming), None, None, Some(&running));
+        let chrome = snapshots
+            .iter()
+            .filter(|snapshot| snapshot.item.category == "浏览器缓存")
+            .collect::<Vec<_>>();
+
+        assert_eq!(chrome.len(), REGENERABLE_CACHE_DIRECTORIES.len());
+        assert!(chrome.iter().all(|snapshot| {
+            snapshot
+                .item
+                .blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("Google Chrome 正在运行"))
+        }));
+    }
+
+    #[test]
     fn application_rules_use_roaming_and_only_explicit_cache_directories() {
         use std::collections::BTreeSet;
 
-        let rules = rules_for_roots(None, Some(Path::new("Roaming")));
+        let rules = rules_for_roots(None, Some(Path::new("Roaming")), None, None);
         let application_rules = rules
             .iter()
             .filter(|rule| {
@@ -1049,14 +1895,120 @@ mod tests {
     }
 
     #[test]
+    fn wechat_rules_only_target_explicit_regenerable_leaf_directories() {
+        let discovered = rules_for_roots(None, None, None, None);
+        let wechat_rules = discovered
+            .iter()
+            .filter(|rule| rule.process_guard == Some(ProcessGuard::WeChat))
+            .collect::<Vec<_>>();
+
+        assert_eq!(wechat_rules.len(), 36);
+        for rule in &wechat_rules {
+            assert!(matches!(rule.base, RootBase::Local | RootBase::Roaming));
+            assert!(rule.category.starts_with("微信"));
+            assert!(matches!(rule.risk, RiskLevel::Low));
+            assert!(matches!(rule.matcher, FileMatcher::AllFilesRecursive));
+
+            let relative = rule.relative.to_string_lossy().replace('\\', "/");
+            assert!(WECHAT_INSTALLATIONS.iter().any(|(installation, _, _)| {
+                WECHAT_REGENERABLE_DIRECTORIES
+                    .iter()
+                    .any(|(leaf, _, _, _)| {
+                        relative.eq_ignore_ascii_case(&format!("Tencent/{installation}/{leaf}"))
+                    })
+            }));
+            assert!(![
+                "WeChat Files",
+                "xwechat_files",
+                "FileStorage",
+                "MsgAttach",
+                "Image",
+                "Video",
+                "File",
+                "Voice2",
+                "Emotion",
+                "Temp",
+            ]
+            .iter()
+            .any(|protected| {
+                rule.relative.components().any(|component| {
+                    component
+                        .as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(protected)
+                })
+            }));
+        }
+    }
+
+    #[test]
+    fn wechat_running_during_scan_skips_all_wechat_rules() {
+        let directory = TestDirectory::new();
+        let local = directory.path().join("Local");
+        let roaming = directory.path().join("Roaming");
+        create_directory(&local, "Tencent/WeChat/Cache");
+        create_directory(&roaming, "placeholder");
+        fs::write(
+            local.join("Tencent/WeChat/Cache/cache-entry"),
+            b"regenerable",
+        )
+        .expect("WeChat cache entry should be written");
+
+        let closed = Vec::<String>::new();
+        let closed_scan =
+            scan_with_environment(Some(&local), Some(&roaming), None, None, Some(&closed));
+        assert_eq!(
+            closed_scan
+                .iter()
+                .filter(|snapshot| snapshot.item.category.starts_with("微信"))
+                .count(),
+            1
+        );
+
+        let running = vec!["WeChat.exe".to_string()];
+        let running_scan =
+            scan_with_environment(Some(&local), Some(&roaming), None, None, Some(&running));
+        assert!(running_scan
+            .iter()
+            .all(|snapshot| !snapshot.item.category.starts_with("微信")));
+    }
+
+    #[test]
+    fn execution_guard_rejects_wechat_restarted_after_scan() {
+        let rule = rules_for_roots(None, None, None, None)
+            .into_iter()
+            .find(|rule| rule.id == "wechat-local-wechat-cache")
+            .expect("WeChat cache rule should exist");
+        let closed = Vec::<String>::new();
+        assert!(process_guard_error(&rule, Some(&closed)).is_none());
+
+        let restarted = vec!["Weixin.exe".to_string()];
+        let error = process_guard_error(&rule, Some(&restarted))
+            .expect("running WeChat should block execution recheck");
+        assert!(error.contains("微信"));
+        assert!(error.contains("正在运行"));
+        let unknown_state =
+            process_guard_error(&rule, None).expect("unknown process state should fail closed");
+        assert!(unknown_state.contains("无法确认"));
+        assert!(unknown_state.contains("微信"));
+    }
+
+    #[test]
     fn process_guard_matching_is_exact_case_insensitive_and_pure() {
         for (guard, process_name) in [
-            (ProcessGuard::Edge, "MSEDGE.EXE"),
-            (ProcessGuard::Chrome, "chrome.exe"),
-            (ProcessGuard::Firefox, "firefox.exe"),
+            (ProcessGuard::Browser(BrowserProcess::Edge), "MSEDGE.EXE"),
+            (ProcessGuard::Browser(BrowserProcess::Chrome), "chrome.exe"),
+            (
+                ProcessGuard::Browser(BrowserProcess::Firefox),
+                "firefox.exe",
+            ),
             (ProcessGuard::VsCode, "Code.exe"),
             (ProcessGuard::Discord, "Discord.exe"),
             (ProcessGuard::Figma, "Figma.exe"),
+            (ProcessGuard::WeChat, "WECHAT.EXE"),
+            (ProcessGuard::WeChat, "Weixin.exe"),
+            (ProcessGuard::WeChat, "WeChatAppEx.exe"),
+            (ProcessGuard::WeChat, "WeixinAppEx.exe"),
         ] {
             assert!(process_guard_blocks(guard, &[process_name.to_string()]));
         }
@@ -1065,24 +2017,39 @@ mod tests {
             "explorer.exe".to_string(),
             r"C:\Program Files\Google\Chrome\CHROME.EXE".to_string(),
         ];
-        assert!(process_guard_blocks(ProcessGuard::Chrome, &chrome_running));
-        assert!(!process_guard_blocks(ProcessGuard::Edge, &chrome_running));
+        assert!(process_guard_blocks(
+            ProcessGuard::Browser(BrowserProcess::Chrome),
+            &chrome_running
+        ));
+        assert!(!process_guard_blocks(
+            ProcessGuard::Browser(BrowserProcess::Edge),
+            &chrome_running
+        ));
 
         let lookalikes = vec![
             "chrome_proxy.exe".to_string(),
             "msedgewebview2.exe".to_string(),
             "discord-helper.exe".to_string(),
+            "wechat-helper.exe".to_string(),
+            "weixin-updater.exe".to_string(),
         ];
-        assert!(!process_guard_blocks(ProcessGuard::Chrome, &lookalikes));
-        assert!(!process_guard_blocks(ProcessGuard::Edge, &lookalikes));
+        assert!(!process_guard_blocks(
+            ProcessGuard::Browser(BrowserProcess::Chrome),
+            &lookalikes
+        ));
+        assert!(!process_guard_blocks(
+            ProcessGuard::Browser(BrowserProcess::Edge),
+            &lookalikes
+        ));
         assert!(!process_guard_blocks(ProcessGuard::Discord, &lookalikes));
+        assert!(!process_guard_blocks(ProcessGuard::WeChat, &lookalikes));
 
         let chrome_rule = cache_rule(
             "test-chrome-cache",
             "test",
             RootBase::Local,
             "cache",
-            Some(ProcessGuard::Chrome),
+            Some(ProcessGuard::Browser(BrowserProcess::Chrome)),
         );
         assert!(!rule_is_executable(&chrome_rule, Some(&chrome_running)));
         assert!(rule_is_executable(&chrome_rule, Some(&lookalikes)));

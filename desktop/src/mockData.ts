@@ -6,12 +6,32 @@ import type {
   DuplicateGroup,
   LargeFileEntry,
   OperationRecord,
+  PartitionDisk,
   StartupEntry,
   StorageCategory,
 } from './types';
 
 const GB = 1024 ** 3;
 const MB = 1024 ** 2;
+
+export const partitionDisks: PartitionDisk[] = [
+  {
+    number: 0, friendlyName: 'Qingpan NVMe 512GB', partitionStyle: 'GPT', busType: 'NVMe', healthStatus: 'Healthy', operationalStatus: 'Online', sizeBytes: 512 * GB,
+    isBoot: true, isSystem: true, isOffline: false, isReadOnly: false,
+    partitions: [
+      { partitionNumber: 1, driveLetter: null, offsetBytes: 1 * MB, sizeBytes: 100 * MB, partitionType: 'System', gptType: 'EFI', isSystem: true, isBoot: false, isActive: false, isHidden: true, isReadOnly: false, noDefaultDriveLetter: true, fileSystem: 'FAT32', label: 'EFI SYSTEM', healthStatus: 'Healthy', freeBytes: 62 * MB },
+      { partitionNumber: 2, driveLetter: 'C', offsetBytes: 101 * MB, sizeBytes: 300 * GB, partitionType: 'Basic', gptType: 'Basic data', isSystem: false, isBoot: true, isActive: false, isHidden: false, isReadOnly: false, noDefaultDriveLetter: false, fileSystem: 'NTFS', label: 'Windows', healthStatus: 'Healthy', freeBytes: 112 * GB },
+      { partitionNumber: 3, driveLetter: null, offsetBytes: (300 * GB) + (101 * MB), sizeBytes: 900 * MB, partitionType: 'Recovery', gptType: 'Recovery', isSystem: false, isBoot: false, isActive: false, isHidden: true, isReadOnly: false, noDefaultDriveLetter: true, fileSystem: 'NTFS', label: 'Windows RE', healthStatus: 'Healthy', freeBytes: 124 * MB },
+    ],
+  },
+  {
+    number: 1, friendlyName: 'Qingpan Data 1TB', partitionStyle: 'GPT', busType: 'SATA', healthStatus: 'Healthy', operationalStatus: 'Online', sizeBytes: 1024 * GB,
+    isBoot: false, isSystem: false, isOffline: false, isReadOnly: false,
+    partitions: [
+      { partitionNumber: 1, driveLetter: 'D', offsetBytes: 1 * MB, sizeBytes: 950 * GB, partitionType: 'Basic', gptType: 'Basic data', isSystem: false, isBoot: false, isActive: false, isHidden: false, isReadOnly: false, noDefaultDriveLetter: false, fileSystem: 'NTFS', label: '资料', healthStatus: 'Healthy', freeBytes: 642 * GB },
+    ],
+  },
+];
 
 export const disks: DiskInfo[] = [
   { id: 'c', name: 'Windows', mount: 'C:', totalBytes: 512 * GB, freeBytes: 183.4 * GB },
@@ -63,6 +83,56 @@ export const cleanupItems: CleanupItem[] = [
     id: 'browser-identity', scope: 'browser', category: '受保护数据', product: '所有浏览器', name: '密码、书签与自动填充',
     path: '浏览器配置文件', description: '账号凭据和用户主动保存的数据', reason: '核心用户数据，规则内核永久拒绝普通清理请求',
     sizeBytes: 42 * MB, fileCount: 0, risk: 'high', confidence: 'high', impact: 'user_data', recoverability: 'protected', deleteMode: 'permanent', selectable: false,
+  },
+  {
+    id: 'wechat-local-wechat-cache', scope: 'wechat', category: '微信运行缓存', product: '微信', name: '网络缓存',
+    path: '%LOCALAPPDATA%\\Tencent\\WeChat\\Cache', description: '微信运行时生成、可重新下载的网络资源', reason: '仅匹配 AppData 下名为 Cache 的明确叶子目录，不进入 WeChat Files',
+    sizeBytes: 1.12 * GB, fileCount: 2864, risk: 'low', confidence: 'high', impact: 'rebuild', recoverability: 'rebuildable', deleteMode: 'permanent', selectable: true,
+  },
+  {
+    id: 'wechat-roaming-weixin-logs', scope: 'wechat', category: '微信诊断数据', product: '微信 4.x', name: '运行日志',
+    path: '%APPDATA%\\Tencent\\Weixin\\Logs', description: '用于排查客户端运行问题的诊断日志', reason: '微信关闭后仅处理 Logs 目录中的诊断数据',
+    sizeBytes: 46 * MB, fileCount: 218, risk: 'low', confidence: 'high', impact: 'none', recoverability: 'rebuildable', deleteMode: 'permanent', selectable: true,
+  },
+  {
+    id: 'wechat-local-xwechat-crash-reports', scope: 'wechat', category: '微信诊断数据', product: '微信 4.x', name: '崩溃报告',
+    path: '%LOCALAPPDATA%\\Tencent\\xwechat\\Crashpad\\reports', description: '客户端异常退出后留下的崩溃诊断报告', reason: '仅匹配 Crashpad\\reports 叶子目录，不扫描聊天附件或数据库',
+    sizeBytes: 128 * MB, fileCount: 12, risk: 'low', confidence: 'high', impact: 'none', recoverability: 'rebuildable', deleteMode: 'permanent', selectable: true,
+  },
+  {
+    id: 'wechat-user-demo-chat-records', scope: 'wechat', category: '微信聊天记录', product: '微信 · 当前账户', name: '聊天记录',
+    path: '%USERPROFILE%\\Documents\\WeChat Files\\wxid_demo\\Msg', description: '本地聊天数据库与索引', reason: '用户主动创建的数据，默认不勾选且删除后无法恢复',
+    sizeBytes: 3.8 * GB, fileCount: 78, risk: 'high', confidence: 'high', impact: 'user_data', recoverability: 'irreversible', deleteMode: 'permanent', selectable: true,
+  },
+  {
+    id: 'wechat-user-demo-images', scope: 'wechat', category: '微信图片', product: '微信 · 当前账户', name: '聊天图片',
+    path: '%USERPROFILE%\\Documents\\WeChat Files\\wxid_demo\\FileStorage\\Image', description: '聊天中接收和保存的原图与图片附件', reason: '仅匹配 Image 与 MsgAttach 中的 Image/Thumb 目录',
+    sizeBytes: 6.4 * GB, fileCount: 12480, risk: 'high', confidence: 'high', impact: 'user_data', recoverability: 'irreversible', deleteMode: 'permanent', selectable: true,
+  },
+  {
+    id: 'wechat-user-demo-videos', scope: 'wechat', category: '微信视频', product: '微信 · 当前账户', name: '聊天视频',
+    path: '%USERPROFILE%\\Documents\\WeChat Files\\wxid_demo\\FileStorage\\Video', description: '聊天中接收和保存的视频', reason: '仅匹配 Video 目录，不按文件扩展名猜测',
+    sizeBytes: 4.7 * GB, fileCount: 426, risk: 'high', confidence: 'high', impact: 'user_data', recoverability: 'irreversible', deleteMode: 'permanent', selectable: true,
+  },
+  {
+    id: 'wechat-user-demo-files', scope: 'wechat', category: '微信文件', product: '微信 · 当前账户', name: '聊天文件',
+    path: '%USERPROFILE%\\Documents\\WeChat Files\\wxid_demo\\FileStorage\\File', description: '聊天中接收和保存的文档与压缩包', reason: '仅匹配 File 目录，用户主动决定是否清理',
+    sizeBytes: 2.3 * GB, fileCount: 684, risk: 'high', confidence: 'high', impact: 'user_data', recoverability: 'irreversible', deleteMode: 'permanent', selectable: true,
+  },
+  {
+    id: 'wechat-user-demo-voices', scope: 'wechat', category: '微信语音', product: '微信 · 当前账户', name: '语音消息',
+    path: '%USERPROFILE%\\Documents\\WeChat Files\\wxid_demo\\FileStorage\\MsgAttach\\*\\Audio', description: '聊天中的语音消息', reason: '仅匹配 Audio/Voice/Voice2 目录，不使用 .dat 扩展名误判',
+    sizeBytes: 386 * MB, fileCount: 1940, risk: 'high', confidence: 'high', impact: 'user_data', recoverability: 'irreversible', deleteMode: 'permanent', selectable: true,
+  },
+  {
+    id: 'wechat-user-demo-favorites', scope: 'wechat', category: '微信收藏', product: '微信 · 当前账户', name: '收藏内容',
+    path: '%USERPROFILE%\\Documents\\WeChat Files\\wxid_demo\\FileStorage\\Fav', description: '保存在本机的微信收藏内容', reason: '仅匹配 Fav 目录，默认不勾选',
+    sizeBytes: 742 * MB, fileCount: 860, risk: 'high', confidence: 'high', impact: 'user_data', recoverability: 'irreversible', deleteMode: 'permanent', selectable: true,
+  },
+  {
+    id: 'wechat-user-demo-emotions', scope: 'wechat', category: '微信表情', product: '微信 · 当前账户', name: '自定义表情',
+    path: '%USERPROFILE%\\Documents\\WeChat Files\\wxid_demo\\FileStorage\\CustomEmotion', description: '用户保存和下载的自定义表情', reason: '仅匹配 CustomEmotion 目录，默认不勾选',
+    sizeBytes: 318 * MB, fileCount: 1101, risk: 'high', confidence: 'high', impact: 'user_data', recoverability: 'irreversible', deleteMode: 'permanent', selectable: true,
   },
   {
     id: 'figma-cache', scope: 'apps', category: '应用缓存', product: 'Figma', name: '预览与网络缓存',

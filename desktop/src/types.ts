@@ -1,5 +1,5 @@
-export type Page = 'overview' | 'cleanup' | 'files' | 'analysis' | 'apps' | 'recovery' | 'settings';
-export type CleanupScope = 'system' | 'browser' | 'apps';
+export type Page = 'overview' | 'cleanup' | 'files' | 'analysis' | 'partition' | 'apps' | 'recovery' | 'settings';
+export type CleanupScope = 'system' | 'browser' | 'apps' | 'wechat';
 export type RiskLevel = 'low' | 'medium' | 'high';
 export type Confidence = 'high' | 'medium' | 'low';
 export type Impact = 'none' | 'rebuild' | 'signout' | 'user_data';
@@ -14,6 +14,40 @@ export interface DiskInfo {
   freeBytes: number;
 }
 
+export interface DiskPartition {
+  partitionNumber: number;
+  driveLetter: string | null;
+  offsetBytes: number;
+  sizeBytes: number;
+  partitionType: string;
+  gptType: string;
+  isSystem: boolean;
+  isBoot: boolean;
+  isActive: boolean;
+  isHidden: boolean;
+  isReadOnly: boolean;
+  noDefaultDriveLetter: boolean;
+  fileSystem: string;
+  label: string;
+  healthStatus: string;
+  freeBytes: number;
+}
+
+export interface PartitionDisk {
+  number: number;
+  friendlyName: string;
+  partitionStyle: string;
+  busType: string;
+  healthStatus: string;
+  operationalStatus: string;
+  sizeBytes: number;
+  isBoot: boolean;
+  isSystem: boolean;
+  isOffline: boolean;
+  isReadOnly: boolean;
+  partitions: DiskPartition[];
+}
+
 export interface CleanupItem {
   id: string;
   scope: CleanupScope;
@@ -22,6 +56,7 @@ export interface CleanupItem {
   name: string;
   path: string;
   description: string;
+  blockedReason?: string;
   reason: string;
   sizeBytes: number;
   fileCount: number;

@@ -51,4 +51,35 @@ describe('safe cleanup selection', () => {
 
     expect(useAppStore.getState().selected.size).toBe(0);
   });
+
+  it('selects a high-confidence rebuildable WeChat cache by default', () => {
+    const wechatCache = item('wechat-cache', {
+      scope: 'wechat',
+      category: '微信运行缓存',
+      product: '微信',
+    });
+
+    useAppStore.getState().setSafeDefaults([wechatCache]);
+
+    expect([...useAppStore.getState().selected]).toEqual([wechatCache.id]);
+  });
+
+  it('keeps irreversible WeChat user data unselected but allows an explicit toggle', () => {
+    const chatRecords = item('wechat-chat-records', {
+      scope: 'wechat',
+      category: '微信聊天记录',
+      product: '微信',
+      risk: 'high',
+      impact: 'user_data',
+      recoverability: 'irreversible',
+      selectable: true,
+    });
+    useAppStore.setState({ cleanupItems: [chatRecords] });
+
+    useAppStore.getState().setSafeDefaults([chatRecords]);
+    expect(useAppStore.getState().selected.size).toBe(0);
+
+    useAppStore.getState().toggleItem(chatRecords.id);
+    expect([...useAppStore.getState().selected]).toEqual([chatRecords.id]);
+  });
 });

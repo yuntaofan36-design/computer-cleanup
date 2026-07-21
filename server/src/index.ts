@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { openDb } from "./db.js";
 import { allowedOrigins, isOriginAllowed } from "./cors.js";
 import {
@@ -13,6 +15,7 @@ import {
   verifyPassword,
 } from "./security.js";
 const PORT = Number(process.env.PORT || 8787),
+  HOST = process.env.HOST || "127.0.0.1",
   SECRET = process.env.SERVER_SECRET || "development-only-change-me",
   PEPPER = process.env.LICENSE_PEPPER || SECRET,
   ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-me-now";
@@ -20,7 +23,9 @@ const db = openDb(process.env.DB_PATH || "./data/qingpan.db", ADMIN_PASSWORD),
   app = express(),
   origins = allowedOrigins(
     process.env.ALLOWED_ORIGINS || process.env.WEB_ORIGIN,
-  );
+  ),
+  webDist = resolve(process.env.WEB_DIST || "./public"),
+  releasesDir = resolve(process.env.RELEASES_DIR || "./releases");
 app.use(helmet());
 app.use(
   cors({
@@ -264,7 +269,28 @@ app.post("/api/license/validate", (req, res) => {
     );
   res.status(valid ? 200 : 403).json({ valid, expiresAt: row?.expires_at });
 });
+// The web dashboard and signed desktop-update artifacts share the same origin
+// as the API in production.  Keeping releases outside the database makes
+// image upgrades stateless and allows the data volume to be backed up alone.
+app.use(
+  "/releases",
+  (req, res, next) => {
+    if (req.path.endsWith("latest.json")) {
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+    } else {
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    }
+    next();
+  },
+  express.static(releasesDir, { index: false }),
+);
+if (existsSync(webDist)) {
+  app.use(express.static(webDist, { index: "index.html", maxAge: "1h" }));
+  app.get(/^(?!\/api(?:\/|$)|\/releases(?:\/|$)).*/, (_req, res) =>
+    res.sendFile(resolve(webDist, "index.html")),
+  );
+}
 app.use((_req, res) => res.status(404).json({ error: "接口不存在" }));
-app.listen(PORT, "127.0.0.1", () =>
-  console.log(`Qingpan server: http://127.0.0.1:${PORT}`),
+app.listen(PORT, HOST, () =>
+  console.log(`Qingpan server: http://${HOST}:${PORT}`),
 );

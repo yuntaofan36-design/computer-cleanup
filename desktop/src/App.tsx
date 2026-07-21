@@ -32,6 +32,8 @@ import {
   loadApps,
   loadDisks,
   loadOperationRecords,
+  loadPartitionDisks,
+  openWindowsDiskManagement,
   requestUninstall,
   revealInExplorer,
   scanCleanup,
@@ -42,6 +44,7 @@ import {
 import AppManagement from './pages/AppManagement';
 import CleanupCenter from './pages/CleanupCenter';
 import FileDiscovery, { type FileDiscoveryTab } from './pages/FileDiscovery';
+import DiskPartition from './pages/DiskPartition';
 import Overview from './pages/Overview';
 import RecoveryCenter from './pages/RecoveryCenter';
 import SettingsPage from './pages/SettingsPage';
@@ -56,6 +59,7 @@ import type {
   LargeFileEntry,
   OperationRecord,
   Page,
+  PartitionDisk,
   StorageCategory,
 } from './types';
 
@@ -64,6 +68,7 @@ const primaryNav: Array<{ id: Page; label: string; description: string; icon: ty
   { id: 'cleanup', label: '清理中心', description: '有证据地清理', icon: Sparkles },
   { id: 'files', label: '文件发现', description: '大文件与重复项', icon: Files },
   { id: 'analysis', label: '磁盘地图', description: '空间可视化', icon: ChartNoAxesCombined },
+  { id: 'partition', label: '磁盘分区', description: '布局与系统管理', icon: HardDrive },
 ];
 
 const secondaryNav: Array<{ id: Page; label: string; icon: typeof Package }> = [
@@ -128,6 +133,10 @@ export default function App() {
   const [discoveryDuplicates, setDiscoveryDuplicates] = useState<DuplicateGroup[]>(nativeRuntime ? [] : previewDuplicateGroups);
   const [analysisDirectories, setAnalysisDirectories] = useState<DirectoryUsage[]>(nativeRuntime ? [] : previewDirectories);
   const [analysisCategories, setAnalysisCategories] = useState<StorageCategory[]>(nativeRuntime ? [] : previewStorageCategories);
+  const [partitionDisks, setPartitionDisks] = useState<PartitionDisk[]>([]);
+  const [partitionLoading, setPartitionLoading] = useState(false);
+  const [partitionLoaded, setPartitionLoaded] = useState(false);
+  const [partitionError, setPartitionError] = useState('');
   const [fileScanStatus, setFileScanStatus] = useState<TaskStatus>(nativeRuntime ? 'idle' : 'complete');
   const [analysisScanStatus, setAnalysisScanStatus] = useState<TaskStatus>(nativeRuntime ? 'idle' : 'complete');
   const [fileScannedAt, setFileScannedAt] = useState(nativeRuntime ? '' : '演示数据');
@@ -138,6 +147,7 @@ export default function App() {
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
   const [executeOpen, setExecuteOpen] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [irreversibleConfirmed, setIrreversibleConfirmed] = useState(false);
   const [toast, setToast] = useState('');
   const activeDisk = disks.find((disk) => disk.id === activeDiskId) || disks[0] || (nativeRuntime ? unavailableDisk : previewDisks[0]);
   const selectedItems = useMemo(() => cleanupItems.filter((item) => selected.has(item.id)), [cleanupItems, selected]);
@@ -165,6 +175,35 @@ export default function App() {
     const timeout = window.setTimeout(() => setToast(''), 4200);
     return () => window.clearTimeout(timeout);
   }, [toast]);
+
+  useEffect(() => {
+    if (page === 'partition' && !partitionLoaded && !partitionLoading) {
+      void refreshPartitionLayout();
+    }
+  }, [page, partitionLoaded, partitionLoading]);
+
+  async function refreshPartitionLayout() {
+    if (partitionLoading) return;
+    setPartitionLoading(true);
+    setPartitionError('');
+    try {
+      setPartitionDisks(await loadPartitionDisks());
+    } catch (error) {
+      setPartitionError(error instanceof Error ? error.message : '无法读取磁盘分区布局');
+    } finally {
+      setPartitionLoaded(true);
+      setPartitionLoading(false);
+    }
+  }
+
+  async function openPartitionManager() {
+    try {
+      await openWindowsDiskManagement();
+      setToast('已打开 Windows 磁盘管理');
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '无法打开 Windows 磁盘管理');
+    }
+  }
 
   async function runScan() {
     if (scanning) return;
@@ -197,11 +236,14 @@ export default function App() {
   }
 
   async function runCleanup() {
-    if (!selectedItems.length || executing) return;
+    if (!selectedItems.length || executing || (irreversibleCount > 0 && !irreversibleConfirmed)) return;
     setExecuting(true);
     try {
       const ids = selectedItems.map((item) => item.id);
-      const result = await executeCleanup(ids);
+      const irreversibleIds = selectedItems
+        .filter((item) => item.recoverability === 'irreversible')
+        .map((item) => item.id);
+      const result = await executeCleanup(ids, irreversibleIds);
       if (nativeRuntime) {
         const refreshed = await scanCleanup();
         setCleanupItems(refreshed);
@@ -210,6 +252,7 @@ export default function App() {
       }
       removeSelected(ids);
       setExecuteOpen(false);
+      setIrreversibleConfirmed(false);
       setBasketOpen(false);
       setOperationRecords(await loadOperationRecords(50));
       setToast(`已实际释放 ${formatBytes(result.reclaimedBytes)}${result.failed.length ? `，${result.failed.length} 个文件因变化或占用被保留` : ''}`);
@@ -367,14 +410,15 @@ export default function App() {
         {page === 'cleanup' && <CleanupCenter items={cleanupItems} selected={selected} scanning={scanning} progress={progress} scanPath={scanPath} onScan={runScan} onToggle={toggleItem} onOpenBasket={() => setBasketOpen(true)} />}
         {page === 'files' && <FileDiscovery largeFiles={discoveryFiles} duplicateGroups={discoveryDuplicates} scanStatus={fileScanStatus} scannedAt={fileScannedAt || undefined} onScan={(tab) => void runFileScan(tab)} onCancel={() => void cancelFileScan()} onRevealInExplorer={(path) => void reveal(path)} onAddExclusion={addExclusion} />}
         {page === 'analysis' && <StorageAnalysis disk={activeDisk} directories={analysisDirectories} categories={analysisCategories} initialPath={activeDisk.mount} scanStatus={analysisScanStatus} scannedAt={analysisScannedAt || undefined} onScan={() => void runStorageScan()} onCancel={() => void cancelStorageScan()} onAnalyzeDirectory={(directory) => void runStorageScan(directory.path, true)} />}
+        {page === 'partition' && <DiskPartition disks={partitionDisks} loading={partitionLoading} error={partitionError} onRefresh={() => void refreshPartitionLayout()} onOpenDiskManagement={() => void openPartitionManager()} />}
         {page === 'apps' && <AppManagement apps={installedApps} busyAppId={busyAppId} onRequestUninstall={(app) => void uninstall(app.id)} onClearCache={(app) => { setPage('cleanup'); setToast(`请在应用缓存中复核 ${app.name} 的可重建内容`); }} />}
         {page === 'recovery' && <RecoveryCenter records={operationRecords} onRestore={(id) => setToast(`记录 ${id} 没有可直接覆盖恢复的内容`)} />}
         {page === 'settings' && <SettingsPage protectedDirectories={protectedPaths.map((item) => item.path)} exclusionRules={[...builtInExclusionRules, ...userExclusions]} autoCleanupEnabled={false} theme={theme} setTheme={useAppStore.getState().setTheme} />}
       </main>
     </div>
 
-    {basketOpen && <BasketDrawer items={selectedItems} busy={executing} onClose={() => setBasketOpen(false)} onRemove={toggleItem} onExecute={() => setExecuteOpen(true)} />}
-    {executeOpen && <Dialog title="确认执行这份清理计划？" danger busy={executing} confirmLabel="复检并执行" onClose={() => setExecuteOpen(false)} onConfirm={runCleanup}><p>将处理 <strong>{selectedItems.length} 个规则类别</strong>，预计释放 <strong>{formatBytes(selectedBytes)}</strong>。只会删除本次扫描快照中未变化的文件。</p><div className="confirm-proof"><span><ShieldCheck /></span><div><strong>默认失败策略：跳过并保留</strong><small>文件已修改、路径变化、被占用或身份不符时不会强制删除。</small></div></div>{irreversibleCount > 0 && <div className="confirm-warning"><ShieldCheck /><span><strong>{irreversibleCount} 项不可恢复内容</strong><small>这些项目不是默认推荐项，请再次核对。</small></span></div>}</Dialog>}
+    {basketOpen && <BasketDrawer items={selectedItems} busy={executing} onClose={() => setBasketOpen(false)} onRemove={toggleItem} onExecute={() => { setIrreversibleConfirmed(false); setExecuteOpen(true); }} />}
+    {executeOpen && <Dialog title="确认执行这份清理计划？" danger busy={executing} confirmDisabled={irreversibleCount > 0 && !irreversibleConfirmed} confirmLabel={irreversibleCount > 0 ? '永久删除所选内容' : '复检并执行'} onClose={() => { setExecuteOpen(false); setIrreversibleConfirmed(false); }} onConfirm={runCleanup}><p>将处理 <strong>{selectedItems.length} 个规则类别</strong>，预计释放 <strong>{formatBytes(selectedBytes)}</strong>。只会删除本次扫描快照中未变化的文件。</p><div className="confirm-proof"><span><ShieldCheck /></span><div><strong>默认失败策略：跳过并保留</strong><small>文件已修改、路径变化、被占用或身份不符时不会强制删除。</small></div></div>{irreversibleCount > 0 && <><div className="confirm-warning"><ShieldCheck /><span><strong>{irreversibleCount} 项不可恢复内容</strong><small>包含微信聊天或媒体数据，执行后无法找回。</small></span></div><label className="irreversible-confirmation"><input type="checkbox" checked={irreversibleConfirmed} onChange={(event) => setIrreversibleConfirmed(event.target.checked)} /><span>我确认永久删除所选微信用户数据</span></label></>}</Dialog>}
     {toast && <div className="toast" role="status"><ShieldCheck /><span>{toast}</span><button className="icon-button" onClick={() => setToast('')} aria-label="关闭提示"><X /></button></div>}
   </div>;
 }
