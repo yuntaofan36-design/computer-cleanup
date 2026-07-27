@@ -1,0 +1,165 @@
+.panel {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+}
+
+.panel > header {
+  min-height: 64px;
+  padding: 13px 17px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+}
+
+.panel h2 {
+  margin: 0 0 4px;
+  font-size: var(--font-body);
+}
+
+.panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--font-caption);
+}
+
+.list {
+  display: grid;
+}
+
+.row {
+  min-height: 78px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 36px minmax(220px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.row:last-child {
+  border-bottom: 0;
+}
+
+.statusIcon {
+  width: 35px;
+  height: 35px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+}
+
+.statusIcon svg {
+  width: 17px;
+}
+
+.success {
+  color: var(--mint);
+  background: var(--mint-soft);
+}
+
+.partial {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.failed {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.description {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.description strong {
+  font-size: var(--font-small);
+}
+
+.description small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--font-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.description > span {
+  display: flex;
+  gap: 5px;
+}
+
+.description b {
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--panel-muted);
+  font-size: var(--font-caption);
+  font-weight: 600;
+}
+
+.row dl {
+  margin: 0;
+  display: flex;
+  gap: 19px;
+}
+
+.row dl div {
+  min-width: 86px;
+  display: grid;
+  gap: 3px;
+}
+
+.row dt {
+  color: var(--faint);
+  font-size: var(--font-caption);
+}
+
+.row dd {
+  margin: 0;
+  font-size: var(--font-caption);
+  font-weight: 650;
+}
+
+.empty {
+  min-height: 150px;
+  padding: 25px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: left;
+}
+
+.empty > svg {
+  width: 32px;
+  color: var(--brand);
+}
+
+.empty span {
+  display: grid;
+  gap: 4px;
+}
+
+.empty strong {
+  font-size: var(--font-small);
+}
+
+.empty small {
+  color: var(--muted);
+  font-size: var(--font-caption);
+}
+
+@media (max-width: 760px) {
+  .row {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .row dl {
+    grid-column: 2;
+  }
+}

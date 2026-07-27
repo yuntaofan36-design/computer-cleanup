@@ -2,15 +2,21 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { invokeMock } = vi.hoisted(() => ({
+const { invokeMock, listenMock, unlistenMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
+  listenMock: vi.fn(),
+  unlistenMock: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: invokeMock,
 }));
 
-import { executeCleanup, inferCleanupScope, loadAppIcon, loadApps, loadPartitionDisks, scanCleanup } from './native';
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: listenMock,
+}));
+
+import { deleteLargeFiles, inferCleanupScope, loadAppIcon, loadApps, loadPartitionDisks } from './native';
 
 const iconDataUrl = 'data:image/png;base64,AA==';
 
@@ -115,66 +121,55 @@ describe('native application icon loading', () => {
     expect(iconInvocationCount()).toBe(2);
   });
 
-  it('maps high-risk WeChat data to an explicitly selectable irreversible item', async () => {
-    invokeMock.mockResolvedValueOnce([{
-      id: 'wechat-user-test-chat-records',
-      category: '微信聊天记录',
-      name: '微信 · account-test · 聊天记录',
-      path: 'C:\\Users\\Test\\Documents\\WeChat Files\\account-test\\Msg',
-      description: '微信用户数据',
-      sizeBytes: 4096,
-      risk: 'high',
-      deleteMode: 'permanent',
-    }]);
-
-    const [item] = await scanCleanup();
-
-    expect(item.scope).toBe('wechat');
-    expect(item.impact).toBe('user_data');
-    expect(item.recoverability).toBe('irreversible');
-    expect(item.selectable).toBe(true);
-  });
-
-  it('keeps a running browser visible but unavailable for cleanup', async () => {
-    invokeMock.mockResolvedValueOnce([{
-      id: 'browser-vivaldi-profile-cache',
-      category: '浏览器缓存',
-      name: 'Vivaldi · Default · Cache',
-      path: 'C:\\Users\\Test\\AppData\\Local\\Vivaldi\\User Data\\Default\\Cache',
-      description: '可由应用或 Windows 自动重新生成',
-      blockedReason: '检测到 Vivaldi 正在运行；为避免误清理正在使用的数据，本次已安全跳过',
-      sizeBytes: 8192,
-      risk: 'low',
-      deleteMode: 'permanent',
-    }]);
-
-    const [item] = await scanCleanup();
-
-    expect(item.scope).toBe('browser');
-    expect(item.product).toBe('Vivaldi');
-    expect(item.selectable).toBe(false);
-    expect(item.reason).toContain('Vivaldi 正在运行');
-  });
-
-  it('sends irreversible item confirmations separately from the cleanup plan', async () => {
-    invokeMock.mockResolvedValueOnce({ reclaimedBytes: 0, succeeded: 0, failed: [] });
-
-    await executeCleanup(['safe-cache', 'wechat-user-data'], ['wechat-user-data']);
-
-    expect(invokeMock).toHaveBeenCalledWith('execute_cleanup', {
-      request: {
-        itemIds: ['safe-cache', 'wechat-user-data'],
-        confirmed: true,
-        confirmedIrreversibleItemIds: ['wechat-user-data'],
-      },
-    });
-  });
-
   it('loads the validated physical disk layout through a typed Tauri command', async () => {
     invokeMock.mockResolvedValueOnce([]);
 
     await expect(loadPartitionDisks()).resolves.toEqual([]);
 
     expect(invokeMock).toHaveBeenCalledWith('list_partition_disks');
+  });
+});
+
+describe('native large-file delete progress', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      configurable: true,
+      value: {},
+    });
+    invokeMock.mockReset();
+    listenMock.mockReset();
+    unlistenMock.mockReset();
+  });
+
+  it('forwards large-file delete progress and sends only snapshot ids with permanent confirmation', async () => {
+    const progress = {
+      phase: 'running' as const,
+      completed: 0,
+      total: 1,
+      currentItemId: 'large-video',
+      currentName: 'recording.mp4',
+      currentPath: 'D:\\Videos\\recording.mp4',
+      deletedBytes: 0,
+      failed: 0,
+    };
+    let emitProgress: ((event: { payload: typeof progress }) => void) | undefined;
+    listenMock.mockImplementation((_eventName, handler) => {
+      emitProgress = handler;
+      return Promise.resolve(unlistenMock);
+    });
+    invokeMock.mockImplementation(() => {
+      emitProgress?.({ payload: progress });
+      return Promise.resolve({ deletedBytes: 4096, succeededIds: ['large-video'], failed: [] });
+    });
+    const onProgress = vi.fn();
+
+    await deleteLargeFiles(['large-video'], onProgress);
+
+    expect(listenMock).toHaveBeenCalledWith('large-file-delete-progress', expect.any(Function));
+    expect(invokeMock).toHaveBeenCalledWith('delete_large_files', {
+      request: { itemIds: ['large-video'], confirmedPermanent: true },
+    });
+    expect(onProgress).toHaveBeenCalledWith(progress);
+    expect(unlistenMock).toHaveBeenCalledOnce();
   });
 });

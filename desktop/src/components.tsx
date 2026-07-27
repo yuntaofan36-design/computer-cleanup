@@ -1,7 +1,7 @@
-import type { ReactNode } from 'react';
-import { AlertTriangle, Check, ChevronRight, Database, Info, LockKeyhole, RotateCcw, ShieldCheck, ShoppingBasket, Sparkles, Trash2, X } from 'lucide-react';
+import type { CSSProperties, ReactNode } from 'react';
+import { AlertTriangle, Check, CheckCircle2, ChevronRight, Circle, Database, Info, LoaderCircle, LockKeyhole, RotateCcw, ShieldCheck, ShoppingBasket, Sparkles, Trash2, X } from 'lucide-react';
 import { formatBytes } from './format';
-import type { CleanupItem, Confidence, Impact, Recoverability } from './types';
+import type { CleanupItem, CleanupProgress, Confidence, ExecuteResult, Impact, Recoverability } from './types';
 
 export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?: string; title: string; description: string; actions?: ReactNode }) {
   return <header className="page-header"><div>{eyebrow && <p className="eyebrow">{eyebrow}</p>}<h1>{title}</h1><p>{description}</p></div>{actions && <div className="page-actions">{actions}</div>}</header>;
@@ -9,7 +9,7 @@ export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?:
 
 const confidenceLabel: Record<Confidence, string> = { high: '高置信', medium: '需复核', low: '低置信' };
 const impactLabel: Record<Impact, string> = { none: '无感', rebuild: '需重建', signout: '会退出登录', user_data: '用户内容' };
-const recoverabilityLabel: Record<Recoverability, string> = { rebuildable: '可重建', recoverable: '可恢复', irreversible: '不可恢复', protected: '受保护' };
+const recoverabilityLabel: Record<Recoverability, string> = { rebuildable: '可重建', recoverable: '可导出副本', irreversible: '不可恢复', protected: '受保护' };
 
 export function DimensionTags({ item, compact = false }: { item: Pick<CleanupItem, 'confidence' | 'impact' | 'recoverability'>; compact?: boolean }) {
   return <div className={`dimension-tags ${compact ? 'compact' : ''}`}>
@@ -28,14 +28,80 @@ export function Toggle({ checked, onChange, label }: { checked: boolean; onChang
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`toggle ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}><span /></button>;
 }
 
-export function Dialog({ title, children, confirmLabel = '确认', danger = false, busy = false, confirmDisabled = false, onClose, onConfirm }: {
-  title: string; children: ReactNode; confirmLabel?: string; danger?: boolean; busy?: boolean; confirmDisabled?: boolean; onClose: () => void; onConfirm: () => void;
+export function Dialog({ title, children, confirmLabel = '确认', danger = false, busy = false, confirmDisabled = false, hideActions = false, closeDisabled = false, wide = false, onClose, onConfirm }: {
+  title: string; children: ReactNode; confirmLabel?: string; danger?: boolean; busy?: boolean; confirmDisabled?: boolean; hideActions?: boolean; closeDisabled?: boolean; wide?: boolean; onClose: () => void; onConfirm: () => void;
 }) {
-  return <div className="overlay" role="presentation" onMouseDown={onClose}><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" onMouseDown={(event) => event.stopPropagation()}>
-    <button className="icon-button dialog-close" onClick={onClose} aria-label="关闭"><X /></button>
+  return <div className="overlay" role="presentation" onMouseDown={() => { if (!closeDisabled) onClose(); }}><div className={`dialog ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-busy={busy} onMouseDown={(event) => event.stopPropagation()}>
+    {!closeDisabled && <button className="icon-button dialog-close" onClick={onClose} aria-label="关闭"><X /></button>}
     <h2 id="dialog-title">{title}</h2><div className="dialog-body">{children}</div>
-    <div className="dialog-actions"><button className="button secondary" onClick={onClose}>取消</button><button className={`button ${danger ? 'danger' : 'primary'}`} disabled={busy || confirmDisabled} onClick={onConfirm}>{busy ? '正在复检…' : confirmLabel}</button></div>
+    {!hideActions && <div className="dialog-actions"><button className="button secondary" onClick={onClose}>取消</button><button className={`button ${danger ? 'danger' : 'primary'}`} disabled={busy || confirmDisabled} onClick={onConfirm}>{busy ? '正在复检…' : confirmLabel}</button></div>}
   </div></div>;
+}
+
+const cleanupScopeLabel: Record<CleanupItem['scope'], string> = {
+  system: '系统', browser: '浏览器', apps: '软件', wechat: '微信',
+};
+
+export function CleanupExecutionSummary({ items, progress, result, error = '', onDone }: {
+  items: CleanupItem[];
+  progress: CleanupProgress;
+  result?: ExecuteResult | null;
+  error?: string;
+  onDone: () => void;
+}) {
+  const finished = Boolean(result);
+  const failedIds = new Set(result?.failed.map((failure) => failure.id) || []);
+  const completedRatio = progress.totalFiles > 0
+    ? progress.completedFiles / progress.totalFiles
+    : progress.totalItems > 0 ? progress.completedItems / progress.totalItems : 0;
+  const percent = finished ? 100 : Math.max(0, Math.min(100, Math.round(completedRatio * 100)));
+  const reclaimedBytes = result?.reclaimedBytes ?? progress.reclaimedBytes;
+  const stagedBytes = result?.stagedBytes;
+  const retainedFiles = result?.failed.length ?? progress.failedFiles;
+  const activeName = error
+    ? '清理任务未完成'
+    : finished ? '所选内容已完成复检' : progress.currentItemName || '正在准备清理计划';
+  const activePath = error
+    ? error
+    : finished ? `${items.length} 个规则类别已处理` : progress.currentPath || '正在验证最近一次扫描快照';
+
+  return <div className={`cleanup-execution ${finished ? 'finished' : ''} ${error ? 'failed' : ''}`} role="status" aria-live="polite">
+    <div className="execution-progress-hero">
+      <div className="execution-orbit" style={{ '--execution-progress': `${percent * 3.6}deg` } as CSSProperties}>
+        <span>{finished ? <CheckCircle2 /> : error ? <AlertTriangle /> : <LoaderCircle />}<strong>{percent}%</strong></span>
+      </div>
+      <div className="execution-current">
+        <p className="eyebrow">{finished ? '清理结果' : error ? '执行中断' : '正在安全清理'}</p>
+        <h3>{activeName}</h3>
+        <p title={activePath}>{activePath}</p>
+        <div className="execution-track"><span style={{ width: `${percent}%` }} /></div>
+        <small>{progress.completedFiles.toLocaleString()} / {progress.totalFiles.toLocaleString()} 个文件已复检</small>
+      </div>
+    </div>
+
+    <div className="execution-metrics">
+      <div><small>实际释放</small><strong>{formatBytes(reclaimedBytes)}</strong></div>
+      <div className={stagedBytes ? 'attention' : ''}><small>隔离占用</small><strong>{stagedBytes === undefined ? '待结果' : formatBytes(stagedBytes)}</strong></div>
+      <div><small>已处理类别</small><strong>{progress.completedItems} / {progress.totalItems}</strong></div>
+      <div className={retainedFiles ? 'attention' : ''}><small>安全保留</small><strong>{retainedFiles.toLocaleString()} 个文件</strong></div>
+    </div>
+
+    <div className="execution-summary-head"><strong>具体清理内容</strong><span>{items.length} 个规则类别</span></div>
+    <div className="execution-item-list">
+      {items.map((item, index) => {
+        const partial = finished && failedIds.has(item.id);
+        const done = finished || index < progress.completedItems || progress.phase === 'item_complete' && item.id === progress.currentItemId;
+        const running = !finished && progress.phase === 'running' && item.id === progress.currentItemId;
+        const StatusIcon = partial ? AlertTriangle : done ? CheckCircle2 : running ? LoaderCircle : Circle;
+        const statusText = partial ? '部分保留' : done ? '已完成' : running ? '清理中' : '等待中';
+        return <div className={`execution-item ${partial ? 'partial' : done ? 'done' : running ? 'running' : 'pending'}`} key={item.id}>
+          <StatusIcon /><span><strong>{item.name}</strong><small>{cleanupScopeLabel[item.scope]} · {item.product} · {item.fileCount.toLocaleString()} 个文件</small></span><b>{formatBytes(item.sizeBytes)}</b><em>{statusText}</em>
+        </div>;
+      })}
+    </div>
+
+    {(finished || error) && <div className="execution-finish-actions"><span>{error ? <AlertTriangle /> : <ShieldCheck />}{error || (retainedFiles ? '发生变化或被占用的文件已安全保留' : '清理计划已全部完成')}</span><button className="button primary" onClick={onDone}><Check />完成</button></div>}
+  </div>;
 }
 
 export function EmptyState({ icon, title, description, action }: { icon?: ReactNode; title: string; description: string; action?: ReactNode }) {
@@ -46,15 +112,19 @@ export function BasketDrawer({ items, busy, onClose, onExecute, onRemove }: {
   items: CleanupItem[]; busy: boolean; onClose: () => void; onExecute: () => void; onRemove: (id: string) => void;
 }) {
   const total = items.reduce((sum, item) => sum + item.sizeBytes, 0);
+  const quarantineBytes = items
+    .filter((item) => item.deleteMode === 'quarantine')
+    .reduce((sum, item) => sum + item.sizeBytes, 0);
   const reviewCount = items.filter((item) => item.risk !== 'low' || item.recoverability === 'irreversible').length;
   return <div className="drawer-layer" role="presentation" onMouseDown={onClose}><aside className="basket-drawer" aria-label="清理篮" onMouseDown={(event) => event.stopPropagation()}>
     <header><div><span className="drawer-kicker"><ShoppingBasket />清理篮</span><h2>{items.length ? `${items.length} 项待复检` : '还没有选择项目'}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭清理篮"><X /></button></header>
     {!items.length ? <EmptyState icon={<ShoppingBasket />} title="清理篮是空的" description="扫描后，只有高置信度的可清理项才能加入这里。" /> : <>
-      <div className="basket-summary"><div><small>预计可释放</small><strong>{formatBytes(total)}</strong></div><span><ShieldCheck />执行前逐文件复检</span></div>
+      <div className="basket-summary"><div><small>计划处理</small><strong>{formatBytes(total)}</strong></div><span><ShieldCheck />执行前逐文件复检</span></div>
+      {quarantineBytes > 0 && <SafetyNotice tone="info"><strong>{formatBytes(quarantineBytes)} 将移入本机隔离仓库</strong><p>隔离内容可导出副本，但仍占用磁盘空间，不计入实际释放。</p></SafetyNotice>}
       {reviewCount > 0 && <SafetyNotice tone="warning"><strong>{reviewCount} 项需要额外确认</strong><p>包含诊断记录或不可恢复内容，请在最终确认中逐项复核。</p></SafetyNotice>}
       <div className="basket-list">{items.map((item) => <div className="basket-item" key={item.id}><span className={`scope-mark ${item.scope}`} /> <div><strong>{item.name}</strong><small>{item.product} · {formatBytes(item.sizeBytes)}</small></div><button className="icon-button" onClick={() => onRemove(item.id)} aria-label={`移除 ${item.name}`}><X /></button></div>)}</div>
       <div className="basket-proof"><h3>执行时会再次确认</h3><ul><li>路径仍在规则白名单内</li><li>文件大小与修改时间未变化</li><li>不是符号链接、联接点或云占位文件</li><li>被应用锁定的文件会跳过</li></ul></div>
-      <footer><div><small>预计释放</small><strong>{formatBytes(total)}</strong></div><button className="button primary wide" disabled={busy} onClick={onExecute}><Trash2 />{busy ? '正在安全复检' : '查看并执行计划'}<ChevronRight /></button></footer>
+      <footer><div><small>计划处理</small><strong>{formatBytes(total)}</strong></div><button className="button primary wide" disabled={busy} onClick={onExecute}><Trash2 />{busy ? '正在安全复检' : '查看并执行计划'}<ChevronRight /></button></footer>
     </>}
   </aside></div>;
 }

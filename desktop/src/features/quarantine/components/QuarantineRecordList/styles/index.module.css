@@ -1,0 +1,166 @@
+.list {
+  display: grid;
+}
+
+.row {
+  min-height: 108px;
+  padding: 15px 17px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 40px minmax(240px, 1fr) minmax(120px, auto) minmax(150px, auto);
+  align-items: center;
+  gap: 13px;
+}
+
+.row:last-child {
+  border-bottom: 0;
+}
+
+.fileIcon {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.fileIcon svg {
+  width: 19px;
+}
+
+.identity {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.identity > strong {
+  overflow: hidden;
+  font-size: var(--font-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identity > small,
+.meta small,
+.meta span {
+  color: var(--muted);
+  font-size: var(--font-caption);
+}
+
+.state {
+  width: fit-content;
+  max-width: 100%;
+  min-height: 25px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  font-size: var(--font-caption);
+  line-height: 1.4;
+}
+
+.state svg {
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+  flex: 0 0 auto;
+}
+
+.state span {
+  min-width: 0;
+}
+
+.state b {
+  margin-right: 5px;
+}
+
+.safe {
+  color: var(--mint);
+  background: var(--mint-soft);
+}
+
+.warning {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.danger {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.neutral {
+  color: var(--muted);
+  background: var(--panel-muted);
+}
+
+.meta {
+  min-width: 0;
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+}
+
+.meta strong {
+  font-size: var(--font-small);
+}
+
+.meta span {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.action button {
+  white-space: nowrap;
+}
+
+.unavailable {
+  color: var(--faint);
+  font-size: var(--font-caption);
+}
+
+.spin {
+  animation: spin .8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 900px) {
+  .row {
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+  }
+
+  .meta {
+    display: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .row {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .fileIcon {
+    width: 36px;
+    height: 36px;
+    align-self: start;
+  }
+
+  .action {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+}

@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import {
   apps as previewApps,
-  cleanupItems as previewCleanupItems,
   directories as previewDirectories,
   disks as previewDisks,
   duplicateGroups as previewDuplicateGroups,
@@ -10,13 +10,18 @@ import {
   records as previewOperationRecords,
   storageCategories as previewStorageCategories,
 } from './mockData';
+export {
+  createCleanupPlan,
+  executeCleanupPlan,
+  inferCleanupScope,
+  scanCleanup,
+} from './features/cleanup-plan';
 import type {
   AppEntry,
-  CleanupItem,
-  CleanupScope,
   DiskInfo,
   DuplicateScanResult,
-  ExecuteResult,
+  LargeFileDeleteProgress,
+  LargeFileDeleteResult,
   LargeFileScanResult,
   OperationRecord,
   PartitionDisk,
@@ -25,7 +30,6 @@ import type {
   UninstallLaunchResult,
 } from './types';
 
-type NativeCleanupItem = Pick<CleanupItem, 'id' | 'category' | 'name' | 'path' | 'description' | 'blockedReason' | 'sizeBytes' | 'risk' | 'deleteMode'>;
 type NativeAppEntry = Omit<AppEntry, 'cacheBytes' | 'lastUsed'>;
 
 const APP_ICON_DATA_URL_PREFIX = 'data:image/png;base64,';
@@ -120,47 +124,6 @@ const operationStatusMap: Record<NativeOperationStatus, OperationRecord['status'
 
 export const isNativeRuntime = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
-export function inferCleanupScope(categoryValue: string, nameValue: string): CleanupScope {
-  const category = categoryValue.toLowerCase();
-  const classification = `${category} ${nameValue.toLowerCase()}`;
-  if (
-    classification.includes('微信')
-    || classification.includes('wechat')
-    || classification.includes('weixin')
-    || classification.includes('xwechat')
-  ) return 'wechat';
-  if (
-    classification.includes('浏览器')
-    || classification.includes('edge')
-    || classification.includes('chrome')
-    || classification.includes('firefox')
-  ) return 'browser';
-  return category.includes('应用') ? 'apps' : 'system';
-}
-
-function normalizeCleanupItem(item: NativeCleanupItem): CleanupItem {
-  const scope = inferCleanupScope(item.category, item.name);
-  const isWechatUserData = scope === 'wechat' && item.risk === 'high';
-  const blocked = Boolean(item.blockedReason);
-  return {
-    ...item,
-    scope,
-    product: scope === 'browser'
-      ? item.name.split('·')[0]?.trim() || item.name
-      : scope === 'apps' ? item.name : scope === 'wechat' ? '微信' : 'Windows',
-    reason: item.blockedReason || (isWechatUserData
-      ? '命中微信文档根下的明确用户数据目录；默认不勾选，只有主动选择并确认后才会处理'
-      : scope === 'wechat'
-      ? '仅命中微信 AppData 下明确的缓存、日志或崩溃报告叶子目录，不进入聊天数据目录'
-      : item.description || '命中已签名的可重建缓存规则'),
-    fileCount: 0,
-    confidence: 'high',
-    impact: isWechatUserData ? 'user_data' : 'rebuild',
-    recoverability: isWechatUserData ? 'irreversible' : 'rebuildable',
-    selectable: !blocked && (item.risk === 'low' || isWechatUserData),
-  };
-}
-
 function previewScanStats(scannedFiles: number): ScanStats {
   return {
     scannedFiles,
@@ -248,25 +211,6 @@ export async function openWindowsDiskManagement(): Promise<void> {
   return invoke<void>('open_windows_disk_management');
 }
 
-export async function scanCleanup(): Promise<CleanupItem[]> {
-  if (!isNativeRuntime()) return previewCleanupItems;
-  const items = await invoke<NativeCleanupItem[]>('scan_cleanup');
-  return items.map(normalizeCleanupItem);
-}
-
-export async function executeCleanup(
-  itemIds: string[],
-  confirmedIrreversibleItemIds: string[] = [],
-): Promise<ExecuteResult> {
-  if (!isNativeRuntime()) {
-    const reclaimedBytes = previewCleanupItems.filter((item) => itemIds.includes(item.id)).reduce((sum, item) => sum + item.sizeBytes, 0);
-    return { reclaimedBytes, succeeded: itemIds.length, failed: [] };
-  }
-  return invoke<ExecuteResult>('execute_cleanup', {
-    request: { itemIds, confirmed: true, confirmedIrreversibleItemIds },
-  });
-}
-
 export async function loadApps(): Promise<AppEntry[]> {
   if (!isNativeRuntime()) return previewApps;
   appIconRequests.clear();
@@ -335,6 +279,82 @@ export async function scanLargeFiles(
   }
   const request: NativeScanRequest<LargeFileScanOptions> = { taskId, root, options: options ?? {} };
   return invoke<LargeFileScanResult>('scan_large_files', { request });
+}
+
+export async function deleteLargeFiles(
+  itemIds: string[],
+  onProgress?: (progress: LargeFileDeleteProgress) => void,
+): Promise<LargeFileDeleteResult> {
+  if (!isNativeRuntime()) {
+    let deletedBytes = 0;
+    const succeededIds: string[] = [];
+    const failed: LargeFileDeleteResult['failed'] = [];
+    onProgress?.({
+      phase: 'starting',
+      completed: 0,
+      total: itemIds.length,
+      currentItemId: '',
+      currentName: '',
+      currentPath: '',
+      deletedBytes,
+      failed: 0,
+    });
+    for (const [index, id] of itemIds.entries()) {
+      const item = previewLargeFiles.find((entry) => entry.id === id);
+      onProgress?.({
+        phase: 'running',
+        completed: index,
+        total: itemIds.length,
+        currentItemId: id,
+        currentName: item?.name || '未知文件',
+        currentPath: item?.path || '',
+        deletedBytes,
+        failed: failed.length,
+      });
+      if (onProgress) await new Promise((resolve) => window.setTimeout(resolve, 180));
+      if (!item || item.sensitivity === 'protected') {
+        failed.push({ id, error: item ? '受保护文件已安全保留' : '条目不属于最近一次扫描' });
+      } else {
+        deletedBytes += item.sizeBytes;
+        succeededIds.push(id);
+      }
+      onProgress?.({
+        phase: 'item_complete',
+        completed: index + 1,
+        total: itemIds.length,
+        currentItemId: id,
+        currentName: item?.name || '未知文件',
+        currentPath: item?.path || '',
+        deletedBytes,
+        failed: failed.length,
+      });
+    }
+    onProgress?.({
+      phase: 'complete',
+      completed: itemIds.length,
+      total: itemIds.length,
+      currentItemId: '',
+      currentName: '',
+      currentPath: '',
+      deletedBytes,
+      failed: failed.length,
+    });
+    return { deletedBytes, succeededIds, failed };
+  }
+
+  const unlisten = onProgress
+    ? await listen<LargeFileDeleteProgress>(
+      'large-file-delete-progress',
+      (event) => onProgress(event.payload),
+    )
+    : undefined;
+  try {
+    return await invoke<LargeFileDeleteResult>('delete_large_files', {
+      request: { itemIds, confirmedPermanent: true },
+    });
+  } finally {
+    unlisten?.();
+  }
 }
 
 export async function scanDuplicateFiles(

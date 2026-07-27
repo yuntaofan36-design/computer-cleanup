@@ -1,0 +1,158 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  background: rgba(10, 17, 14, .48);
+  backdrop-filter: blur(3px);
+}
+
+.dialog {
+  position: relative;
+  width: min(520px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  padding: 27px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow-md);
+}
+
+.close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+}
+
+.icon {
+  width: 42px;
+  height: 42px;
+  margin-bottom: 15px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--mint);
+  background: var(--mint-soft);
+}
+
+.icon svg {
+  width: 21px;
+}
+
+.dialog h2 {
+  margin: 0 38px 10px 0;
+  font-size: 20px;
+}
+
+.description {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--font-small);
+  line-height: 1.7;
+}
+
+.facts {
+  margin: 16px 0 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-muted);
+}
+
+.facts div {
+  min-height: 39px;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.facts div:last-child {
+  border-bottom: 0;
+}
+
+.facts dt {
+  color: var(--muted);
+  font-size: var(--font-caption);
+}
+
+.facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--font-small);
+  font-weight: 650;
+}
+
+.warning,
+.proof,
+.error {
+  min-height: 44px;
+  margin-top: 11px;
+  padding: 10px 12px;
+  border: 1px solid;
+  border-radius: 8px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: var(--font-caption);
+  line-height: 1.5;
+}
+
+.warning {
+  color: #806025;
+  border-color: #ead2a6;
+  background: var(--amber-soft);
+}
+
+.proof {
+  color: #397564;
+  border-color: #bfe5d7;
+  background: var(--mint-soft);
+}
+
+.error {
+  color: var(--red);
+  border-color: #efc3bd;
+  background: var(--red-soft);
+}
+
+.warning svg,
+.proof svg,
+.error svg {
+  width: 17px;
+  flex: 0 0 auto;
+}
+
+.warning strong {
+  margin-right: 4px;
+}
+
+.actions {
+  margin-top: 21px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 620px) {
+  .overlay {
+    padding: 12px;
+  }
+
+  .dialog {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+    padding: 21px;
+  }
+
+  .facts div {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+}

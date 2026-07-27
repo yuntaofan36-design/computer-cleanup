@@ -54,6 +54,20 @@ const runningBrowserItem: CleanupItem = {
   selectable: false,
 };
 
+const quarantinedTempItem: CleanupItem = {
+  ...wechatItem,
+  id: 'temp',
+  scope: 'system',
+  category: '系统临时文件',
+  product: 'Windows',
+  name: '用户临时文件',
+  path: '%LOCALAPPDATA%\\Temp',
+  description: '超过最小年龄的临时文件',
+  reason: '命中 temp 低风险实验规则',
+  recoverability: 'recoverable',
+  deleteMode: 'quarantine',
+};
+
 describe('WeChat cleanup scope', () => {
   it('shows optional user data unselected while keeping safe WeChat cache selected', () => {
     const onToggle = vi.fn();
@@ -70,10 +84,10 @@ describe('WeChat cleanup scope', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /微信专清/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /微信专清/ }));
 
     expect(screen.getByText('聊天与媒体数据由你决定是否清理')).toBeTruthy();
-    expect(screen.getByText(/会分类展示但默认不勾选/)).toBeTruthy();
+    expect(screen.getByText(/默认不勾选/)).toBeTruthy();
     expect(screen.getAllByText('网络缓存')).toHaveLength(2);
     expect(screen.getByText('聊天记录')).toBeTruthy();
     expect(container.querySelector('.item-symbol.wechat svg')).toBeTruthy();
@@ -104,7 +118,7 @@ describe('browser cleanup scope', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /浏览器数据/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /浏览器数据/ }));
 
     expect(screen.getByText('使用中')).toBeTruthy();
     expect(screen.getByText('浏览器正在使用')).toBeTruthy();
@@ -112,5 +126,74 @@ describe('browser cleanup scope', () => {
     expect(checkbox.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(checkbox);
     expect(onToggle).not.toHaveBeenCalled();
+  });
+});
+
+describe('cleanup plan controls', () => {
+  it('selects every recommended item in the current group', () => {
+    const secondSafeItem = { ...wechatItem, id: 'wechat-local-wechat-code-cache', name: '代码缓存' };
+    const onToggle = vi.fn();
+    render(
+      <CleanupCenter
+        items={[wechatItem, secondSafeItem, chatItem]}
+        selected={new Set()}
+        scanning={false}
+        progress={0}
+        scanPath=""
+        onScan={vi.fn()}
+        onToggle={onToggle}
+        onOpenBasket={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '全选本组' }));
+
+    expect(onToggle).toHaveBeenCalledTimes(2);
+    expect(onToggle).toHaveBeenNthCalledWith(1, wechatItem.id);
+    expect(onToggle).toHaveBeenNthCalledWith(2, secondSafeItem.id);
+  });
+
+  it('opens final review from the one-click cleanup action', () => {
+    const onClean = vi.fn();
+    render(
+      <CleanupCenter
+        items={[wechatItem]}
+        selected={new Set([wechatItem.id])}
+        scanning={false}
+        progress={0}
+        scanPath=""
+        onScan={vi.fn()}
+        onToggle={vi.fn()}
+        onOpenBasket={vi.fn()}
+        onClean={onClean}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /一键安全清理/ }));
+
+    expect(onClean).toHaveBeenCalledOnce();
+  });
+
+  it('describes quarantine as exportable storage instead of permanent deletion', () => {
+    render(
+      <CleanupCenter
+        items={[quarantinedTempItem]}
+        selected={new Set([quarantinedTempItem.id])}
+        scanning={false}
+        progress={0}
+        scanPath=""
+        onScan={vi.fn()}
+        onToggle={vi.fn()}
+        onOpenBasket={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', {
+      name: '查看 用户临时文件 的清理依据',
+    }));
+
+    expect(screen.getByText('可导出副本')).toBeTruthy();
+    expect(screen.getByText(/移入本机隔离仓库/)).toBeTruthy();
+    expect(screen.queryByText('永久删除，必须在最终弹窗再次确认')).toBeNull();
   });
 });

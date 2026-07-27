@@ -42,7 +42,7 @@ export const cleanupItems: CleanupItem[] = [
   {
     id: 'temp', scope: 'system', category: '系统临时文件', product: 'Windows', name: '用户临时文件',
     path: '%LOCALAPPDATA%\\Temp', description: '超过 72 小时且未被占用的临时文件', reason: 'Windows 与应用会在需要时重新创建',
-    sizeBytes: 1.84 * GB, fileCount: 3241, risk: 'low', confidence: 'high', impact: 'none', recoverability: 'rebuildable', deleteMode: 'permanent', selectable: true,
+    sizeBytes: 1.84 * GB, fileCount: 3241, risk: 'low', confidence: 'high', impact: 'none', recoverability: 'recoverable', deleteMode: 'quarantine', selectable: true,
   },
   {
     id: 'thumbs', scope: 'system', category: '系统临时文件', product: '文件资源管理器', name: '缩略图缓存',

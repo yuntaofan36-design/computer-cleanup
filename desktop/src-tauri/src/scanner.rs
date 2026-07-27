@@ -1,9 +1,13 @@
 use crate::{
     browsers::{self, BrowserDataRoot, BrowserProcess},
+    fs_safety::{
+        file_identity_from_file, hard_link_count_from_file, has_only_default_data_stream,
+        is_link_or_reparse, is_offline_or_recall, FileIdentity,
+    },
     models::{CleanupItem, DeleteMode, RiskLevel},
 };
 use std::{
-    fs::{self, Metadata},
+    fs::{self, File, Metadata},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -90,6 +94,7 @@ struct FileSnapshot {
     canonical_path: PathBuf,
     size: u64,
     modified: SystemTime,
+    identity: FileIdentity,
 }
 
 #[derive(Clone, Debug)]
@@ -100,10 +105,67 @@ pub struct CleanupSnapshot {
     files: Vec<FileSnapshot>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ExecutionFile {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub size: u64,
+}
+
 impl CleanupSnapshot {
     pub fn item(&self) -> &CleanupItem {
         &self.item
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_snapshot(id: &str, marker: &str, risk: RiskLevel) -> Self {
+        Self::test_snapshot_with_mode(id, marker, risk, DeleteMode::Permanent, 1, 1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_snapshot_with_mode(
+        id: &str,
+        marker: &str,
+        risk: RiskLevel,
+        delete_mode: DeleteMode,
+        file_count: usize,
+        size_bytes: u64,
+    ) -> Self {
+        let root = PathBuf::from(marker);
+        Self {
+            item: CleanupItem {
+                id: id.to_string(),
+                category: "test".into(),
+                name: id.to_string(),
+                path: marker.to_string(),
+                description: String::new(),
+                blocked_reason: None,
+                size_bytes,
+                file_count,
+                risk,
+                delete_mode,
+            },
+            canonical_root: root.clone(),
+            root,
+            files: Vec::new(),
+        }
+    }
+}
+
+pub(crate) fn execution_files(snapshot: &CleanupSnapshot) -> Vec<ExecutionFile> {
+    snapshot
+        .files
+        .iter()
+        .map(|file| ExecutionFile {
+            path: file.path.clone(),
+            file_name: file
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            size: file.size,
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -897,20 +959,6 @@ fn running_process_names() -> Option<Vec<String>> {
     )
 }
 
-fn is_link_or_reparse(metadata: &Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    }
-    #[cfg(not(windows))]
-    false
-}
-
 fn validate_rule_directory_chain(base_root: &Path, rule_root: &Path) -> Result<(), String> {
     let relative = rule_root
         .strip_prefix(base_root)
@@ -924,7 +972,7 @@ fn validate_rule_directory_chain(base_root: &Path, rule_root: &Path) -> Result<(
         current.push(component.as_os_str());
         let metadata = fs::symlink_metadata(&current)
             .map_err(|error| format!("清理目录链已失效或不可访问: {error}"))?;
-        if is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        if is_link_or_reparse(&metadata) || is_offline_or_recall(&metadata) || !metadata.is_dir() {
             return Err("清理目录链包含链接、重解析点或非目录对象".into());
         }
     }
@@ -975,6 +1023,33 @@ fn matches_rule(
     }
 }
 
+fn stable_file_identity(
+    path: &Path,
+    metadata: &Metadata,
+    modified: SystemTime,
+) -> Option<FileIdentity> {
+    if !metadata.is_file()
+        || is_link_or_reparse(metadata)
+        || is_offline_or_recall(metadata)
+        || !has_only_default_data_stream(path).ok()?
+    {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    let handle_metadata = file.metadata().ok()?;
+    if !handle_metadata.is_file()
+        || is_link_or_reparse(&handle_metadata)
+        || is_offline_or_recall(&handle_metadata)
+        || handle_metadata.len() != metadata.len()
+        || handle_metadata.modified().ok()? != modified
+        || hard_link_count_from_file(&file, &handle_metadata).ok()? != 1
+        || !has_only_default_data_stream(path).ok()?
+    {
+        return None;
+    }
+    file_identity_from_file(&file, &handle_metadata).ok()
+}
+
 fn snapshot_directory(
     root: &Path,
     rule: &Rule,
@@ -982,7 +1057,10 @@ fn snapshot_directory(
 ) -> Result<DirectorySnapshot, String> {
     let root_metadata =
         fs::symlink_metadata(root).map_err(|error| format!("无法读取清理目录: {error}"))?;
-    if is_link_or_reparse(&root_metadata) || !root_metadata.is_dir() {
+    if is_link_or_reparse(&root_metadata)
+        || is_offline_or_recall(&root_metadata)
+        || !root_metadata.is_dir()
+    {
         return Err("清理目录不是可信的普通目录".into());
     }
 
@@ -996,7 +1074,9 @@ fn snapshot_directory(
         .filter_entry(|entry| {
             entry.depth() == 0
                 || fs::symlink_metadata(entry.path())
-                    .map(|metadata| !is_link_or_reparse(&metadata))
+                    .map(|metadata| {
+                        !is_link_or_reparse(&metadata) && !is_offline_or_recall(&metadata)
+                    })
                     .unwrap_or(false)
         });
     for entry in entries {
@@ -1012,7 +1092,7 @@ fn snapshot_directory(
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
         };
-        if is_link_or_reparse(&metadata) || !metadata.is_file() {
+        if is_link_or_reparse(&metadata) || is_offline_or_recall(&metadata) || !metadata.is_file() {
             continue;
         }
         let Ok(modified) = metadata.modified() else {
@@ -1027,12 +1107,16 @@ fn snapshot_directory(
         if canonical_path == canonical_root || !canonical_path.starts_with(&canonical_root) {
             continue;
         }
+        let Some(identity) = stable_file_identity(&path, &metadata, modified) else {
+            continue;
+        };
 
         files.push(FileSnapshot {
             path,
             canonical_path,
             size: metadata.len(),
             modified,
+            identity,
         });
     }
 
@@ -1079,28 +1163,41 @@ fn scan_with_environment(
             return None;
         }
 
-        let size_bytes = directory.files.iter().map(|file| file.size).sum();
-        let is_user_data = matches!(&rule.risk, RiskLevel::High);
-        if is_user_data && directory.files.is_empty() {
+        if directory.files.is_empty() {
             return None;
         }
-        let blocked_reason = matches!(rule.process_guard, Some(ProcessGuard::Browser(_)))
-            .then(|| process_guard_error(&rule, process_names))
-            .flatten();
+        let size_bytes = directory.files.iter().map(|file| file.size).sum();
+        let file_count = directory.files.len();
+        let is_user_data = matches!(&rule.risk, RiskLevel::High);
+        let use_preview_quarantine = rule.id == "temp";
+        let blocked_reason = if is_user_data {
+            Some("用户数据隔离尚未达到生产发布门禁；当前版本仅只读展示并安全保留".into())
+        } else {
+            matches!(rule.process_guard, Some(ProcessGuard::Browser(_)))
+                .then(|| process_guard_error(&rule, process_names))
+                .flatten()
+        };
         let item = CleanupItem {
             id: rule.id,
             category: rule.category.into(),
             name: rule.name,
             path: directory.root.display().to_string(),
             description: if is_user_data {
-                "微信用户数据；只有主动选择并确认后才会永久删除".into()
+                "微信用户数据；当前版本仅分析，不执行删除或隔离".into()
+            } else if use_preview_quarantine {
+                "实验性隔离：验证副本后移除源文件，可导出副本但不释放净空间".into()
             } else {
                 "可由应用或 Windows 自动重新生成".into()
             },
             blocked_reason,
             size_bytes,
+            file_count,
             risk: rule.risk,
-            delete_mode: DeleteMode::Permanent,
+            delete_mode: if use_preview_quarantine || is_user_data {
+                DeleteMode::Quarantine
+            } else {
+                DeleteMode::Permanent
+            },
         };
 
         Some(CleanupSnapshot {
@@ -1143,7 +1240,10 @@ fn validated_snapshot_root(snapshot: &CleanupSnapshot, rule: &Rule) -> Result<Pa
 
     let root_metadata =
         fs::symlink_metadata(&snapshot.root).map_err(|error| format!("清理目录已失效: {error}"))?;
-    if is_link_or_reparse(&root_metadata) || !root_metadata.is_dir() {
+    if is_link_or_reparse(&root_metadata)
+        || is_offline_or_recall(&root_metadata)
+        || !root_metadata.is_dir()
+    {
         return Err("清理目录已变为链接或非目录对象".into());
     }
 
@@ -1175,8 +1275,8 @@ fn validated_snapshot_root(snapshot: &CleanupSnapshot, rule: &Rule) -> Result<Pa
 }
 
 fn validate_file_metadata(metadata: &Metadata, snapshot: &FileSnapshot) -> Result<(), String> {
-    if is_link_or_reparse(metadata) || !metadata.is_file() {
-        return Err("文件已变为链接或非普通文件".into());
+    if is_link_or_reparse(metadata) || is_offline_or_recall(metadata) || !metadata.is_file() {
+        return Err("文件已变为链接、云占位或非普通文件".into());
     }
     if metadata.len() != snapshot.size {
         return Err(format!(
@@ -1206,18 +1306,18 @@ fn validate_parent_chain(root: &Path, file: &Path) -> Result<(), String> {
         current.push(component.as_os_str());
         let metadata = fs::symlink_metadata(&current)
             .map_err(|error| format!("文件父目录已失效或不可访问: {error}"))?;
-        if is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        if is_link_or_reparse(&metadata) || is_offline_or_recall(&metadata) || !metadata.is_dir() {
             return Err("文件父目录已变为链接或非目录对象".into());
         }
     }
     Ok(())
 }
 
-fn delete_snapshot_file(
+fn validate_snapshot_file(
     root: &Path,
     canonical_root: &Path,
     snapshot: &FileSnapshot,
-) -> Result<u64, String> {
+) -> Result<(), String> {
     if snapshot.path == root || !snapshot.path.starts_with(root) {
         return Err("快照文件不在规则目录内".into());
     }
@@ -1235,21 +1335,97 @@ fn delete_snapshot_file(
     if canonical_path != snapshot.canonical_path {
         return Err("文件解析路径在扫描后发生变化".into());
     }
+    match has_only_default_data_stream(&snapshot.path) {
+        Ok(true) => {}
+        Ok(false) => return Err("文件包含额外数据流，已安全保留".into()),
+        Err(_) => return Err("无法复检文件数据流，已安全保留".into()),
+    }
 
-    // Re-read link-aware metadata after canonicalization so a path change during
-    // validation is detected before the path is handed to the delete operation.
+    let file =
+        File::open(&snapshot.path).map_err(|error| format!("无法打开文件进行身份复检: {error}"))?;
+    let handle_metadata = file
+        .metadata()
+        .map_err(|error| format!("无法读取打开文件的身份信息: {error}"))?;
+    validate_file_metadata(&handle_metadata, snapshot)?;
+    let current_identity = file_identity_from_file(&file, &handle_metadata)
+        .map_err(|_| "无法确认文件身份，已安全保留".to_string())?;
+    if current_identity != snapshot.identity {
+        return Err("文件身份与扫描快照不一致，已安全保留".into());
+    }
+    let link_count = hard_link_count_from_file(&file, &handle_metadata)
+        .map_err(|_| "无法确认文件硬链接状态，已安全保留".to_string())?;
+    if link_count != 1 {
+        return Err("文件硬链接状态不允许安全删除，已安全保留".into());
+    }
+    match has_only_default_data_stream(&snapshot.path) {
+        Ok(true) => {}
+        Ok(false) => return Err("文件新增了额外数据流，已安全保留".into()),
+        Err(_) => return Err("无法完成文件数据流复检，已安全保留".into()),
+    }
+    drop(file);
+
     let metadata = fs::symlink_metadata(&snapshot.path)
         .map_err(|error| format!("文件在验证期间失效: {error}"))?;
     validate_parent_chain(root, &snapshot.path)?;
     validate_file_metadata(&metadata, snapshot)?;
+    let canonical_after = fs::canonicalize(&snapshot.path)
+        .map_err(|error| format!("无法完成文件路径复检: {error}"))?;
+    if canonical_after != canonical_path {
+        return Err("文件路径在身份复检期间发生变化，已安全保留".into());
+    }
+    match has_only_default_data_stream(&snapshot.path) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("文件在复检期间新增了额外数据流，已安全保留".into()),
+        Err(_) => Err("无法完成删除前数据流复检，已安全保留".into()),
+    }
+}
 
+pub(crate) fn revalidate_execution_file(
+    snapshot: &CleanupSnapshot,
+    path: &Path,
+) -> Result<(), String> {
+    let file = snapshot
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .ok_or_else(|| "文件不属于清理计划快照".to_string())?;
+    let rule = rule_for_snapshot(snapshot)?;
+    let canonical_root = validated_snapshot_root(snapshot, &rule)?;
+    if rule.process_guard.is_some() {
+        let process_names = running_process_names();
+        if let Some(error) = process_guard_error(&rule, process_names.as_deref()) {
+            return Err(error);
+        }
+    }
+    validate_snapshot_file(&snapshot.root, &canonical_root, file)
+}
+
+fn delete_snapshot_file(
+    root: &Path,
+    canonical_root: &Path,
+    snapshot: &FileSnapshot,
+) -> Result<u64, String> {
+    validate_snapshot_file(root, canonical_root, snapshot)?;
     fs::remove_file(&snapshot.path).map_err(|error| format!("删除失败: {error}"))?;
     Ok(snapshot.size)
 }
 
-fn delete_snapshot_files(snapshot: &CleanupSnapshot, canonical_root: &Path) -> DeleteOutcome {
+fn delete_snapshot_files_with_progress<F>(
+    snapshot: &CleanupSnapshot,
+    canonical_root: &Path,
+    on_progress: &mut F,
+) -> DeleteOutcome
+where
+    F: FnMut(usize, usize, &Path, u64, usize),
+{
     let mut outcome = DeleteOutcome::default();
-    for file in &snapshot.files {
+    let total_files = snapshot.files.len();
+    let report_every = total_files
+        .saturating_add(99)
+        .checked_div(100)
+        .unwrap_or(1)
+        .max(1);
+    for (index, file) in snapshot.files.iter().enumerate() {
         match delete_snapshot_file(&snapshot.root, canonical_root, file) {
             Ok(bytes) => outcome.reclaimed_bytes = outcome.reclaimed_bytes.saturating_add(bytes),
             Err(error) => outcome.failures.push(DeleteFailure {
@@ -1257,11 +1433,34 @@ fn delete_snapshot_files(snapshot: &CleanupSnapshot, canonical_root: &Path) -> D
                 error,
             }),
         }
+        let completed_files = index + 1;
+        if completed_files == total_files || completed_files % report_every == 0 {
+            on_progress(
+                completed_files,
+                total_files,
+                &file.path,
+                outcome.reclaimed_bytes,
+                outcome.failures.len(),
+            );
+        }
     }
     outcome
 }
 
+#[cfg(test)]
+fn delete_snapshot_files(snapshot: &CleanupSnapshot, canonical_root: &Path) -> DeleteOutcome {
+    delete_snapshot_files_with_progress(snapshot, canonical_root, &mut |_, _, _, _, _| {})
+}
+
+#[cfg(test)]
 pub fn execute(snapshot: &CleanupSnapshot) -> DeleteOutcome {
+    execute_with_progress(snapshot, |_, _, _, _, _| {})
+}
+
+pub fn execute_with_progress<F>(snapshot: &CleanupSnapshot, mut on_progress: F) -> DeleteOutcome
+where
+    F: FnMut(usize, usize, &Path, u64, usize),
+{
     let rule = match rule_for_snapshot(snapshot) {
         Ok(rule) => rule,
         Err(error) => {
@@ -1301,7 +1500,7 @@ pub fn execute(snapshot: &CleanupSnapshot) -> DeleteOutcome {
         }
     }
 
-    delete_snapshot_files(snapshot, &canonical_root)
+    delete_snapshot_files_with_progress(snapshot, &canonical_root, &mut on_progress)
 }
 
 #[cfg(test)]
@@ -1394,6 +1593,7 @@ mod tests {
                 description: String::new(),
                 blocked_reason: None,
                 size_bytes: directory.files.iter().map(|file| file.size).sum(),
+                file_count: directory.files.len(),
                 risk: RiskLevel::Low,
                 delete_mode: DeleteMode::Permanent,
             },
@@ -1588,6 +1788,10 @@ mod tests {
         assert!(snapshots.iter().all(|snapshot| {
             matches!(&snapshot.item.risk, RiskLevel::High) && !snapshot.files.is_empty()
         }));
+        assert!(snapshots.iter().all(|snapshot| {
+            matches!(&snapshot.item.delete_mode, DeleteMode::Quarantine)
+                && snapshot.item.blocked_reason.is_some()
+        }));
         assert!(snapshots
             .iter()
             .flat_map(|snapshot| &snapshot.files)
@@ -1700,6 +1904,10 @@ mod tests {
                         })
                     })
             }));
+        assert!(snapshots.iter().all(|snapshot| {
+            matches!(&snapshot.item.delete_mode, DeleteMode::Quarantine)
+                && snapshot.item.blocked_reason.is_some()
+        }));
 
         let running = vec!["Weixin.exe".to_string()];
         assert!(
@@ -2100,6 +2308,31 @@ mod tests {
     }
 
     #[test]
+    fn scan_omits_empty_rules_and_reports_the_snapshot_file_count() {
+        let roaming = TestDirectory::new();
+        create_directory(roaming.path(), "Code/Cache");
+        let process_names: Vec<String> = Vec::new();
+
+        let empty =
+            scan_with_environment(None, Some(roaming.path()), None, None, Some(&process_names));
+        assert!(!empty
+            .iter()
+            .any(|snapshot| snapshot.item().id == "vscode-cache"));
+
+        fs::write(roaming.path().join("Code/Cache/cache-entry"), b"cache")
+            .expect("cache entry should be written");
+        let populated =
+            scan_with_environment(None, Some(roaming.path()), None, None, Some(&process_names));
+        let snapshot = populated
+            .iter()
+            .find(|snapshot| snapshot.item().id == "vscode-cache")
+            .expect("populated cache should be returned");
+
+        assert_eq!(snapshot.item().file_count, 1);
+        assert_eq!(snapshot.item().size_bytes, 5);
+    }
+
+    #[test]
     fn unknown_rule_id_is_rejected_without_deleting() {
         let directory = TestDirectory::new();
         let file = directory.path().join("keep.tmp");
@@ -2146,5 +2379,88 @@ mod tests {
         assert_eq!(outcome.failures.len(), 1);
         assert!(outcome.failures[0].error.contains("已变化"));
         assert!(changed_file.exists());
+    }
+
+    #[test]
+    fn execution_revalidation_rejects_a_path_outside_the_snapshot() {
+        let directory = TestDirectory::new();
+        let scanned_file = directory.path().join("scanned.tmp");
+        fs::write(&scanned_file, b"snapshot").expect("scanned file should be written");
+        let snapshot = cleanup_snapshot(directory.path());
+        let outside = directory.path().join("not-in-plan.tmp");
+        fs::write(&outside, b"keep").expect("outside file should be written");
+
+        let error = revalidate_execution_file(&snapshot, &outside)
+            .expect_err("a path outside the immutable snapshot must fail");
+
+        assert!(error.contains("不属于清理计划快照"));
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn same_size_replacement_is_rejected_by_file_identity() {
+        let directory = TestDirectory::new();
+        let file = directory.path().join("identity.tmp");
+        fs::write(&file, b"before").expect("initial file should be written");
+        let mut snapshot = cleanup_snapshot(directory.path());
+
+        fs::remove_file(&file).expect("original file should be removed for replacement fixture");
+        fs::write(&file, b"after!").expect("same-size replacement should be written");
+        snapshot.files[0].modified = fs::symlink_metadata(&file)
+            .and_then(|metadata| metadata.modified())
+            .expect("replacement modified time should be readable");
+
+        let outcome = delete_snapshot_files(&snapshot, &snapshot.canonical_root);
+
+        assert_eq!(outcome.reclaimed_bytes, 0);
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(outcome.failures[0].error.contains("身份"));
+        assert!(file.exists());
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn files_with_multiple_hard_links_are_not_snapshotted() {
+        let directory = TestDirectory::new();
+        let first = directory.path().join("first.tmp");
+        let second = directory.path().join("second.tmp");
+        fs::write(&first, b"linked content").expect("source file should be written");
+        fs::hard_link(&first, &second).expect("hard-link fixture should be created");
+
+        let snapshot = snapshot_directory(directory.path(), &test_rule(), SystemTime::now())
+            .expect("directory scan should complete");
+
+        assert!(snapshot.files.is_empty());
+        assert!(first.exists());
+        assert!(second.exists());
+    }
+
+    #[test]
+    fn cleanup_progress_reaches_total_with_monotonic_reclaimed_bytes() {
+        let directory = TestDirectory::new();
+        fs::write(directory.path().join("first.tmp"), b"one")
+            .expect("first test file should be written");
+        fs::write(directory.path().join("second.tmp"), b"second")
+            .expect("second test file should be written");
+        fs::write(directory.path().join("third.tmp"), b"third file")
+            .expect("third test file should be written");
+        let snapshot = cleanup_snapshot(directory.path());
+        let total_files = snapshot.files.len();
+        let mut reports = Vec::new();
+
+        let outcome = delete_snapshot_files_with_progress(
+            &snapshot,
+            &snapshot.canonical_root,
+            &mut |completed, total, path, reclaimed, failed| {
+                reports.push((completed, total, path.to_path_buf(), reclaimed, failed));
+            },
+        );
+
+        assert!(outcome.failures.is_empty());
+        assert_eq!(outcome.reclaimed_bytes, 19);
+        assert_eq!(reports.last().map(|report| report.0), Some(total_files));
+        assert!(reports.iter().all(|report| report.1 == total_files));
+        assert!(reports.windows(2).all(|pair| pair[0].3 <= pair[1].3));
+        assert!(reports.iter().all(|report| report.4 == 0));
     }
 }

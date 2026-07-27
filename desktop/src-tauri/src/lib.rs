@@ -1,8 +1,13 @@
 mod apps;
 mod audit;
 mod browsers;
+mod capability_policy;
+mod cleanup_plan;
+mod commands;
+mod fs_safety;
 mod models;
 mod partitions;
+mod quarantine;
 mod scanner;
 mod storage;
 
@@ -18,15 +23,17 @@ use std::{
     },
 };
 use sysinfo::Disks;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
-const CLEANUP_RULE_VERSION: &str = "cleanup-rules-v4";
+const LARGE_FILE_RULE_VERSION: &str = "large-file-snapshot-v1";
 const MAX_CONCURRENT_READ_TASKS: usize = 3;
 
 #[derive(Default)]
-struct AppState {
-    scanned: Mutex<HashMap<String, scanner::CleanupSnapshot>>,
+pub(crate) struct AppState {
+    pub(crate) cleanup_plans: cleanup_plan::CleanupPlanStore,
+    pub(crate) quarantine: Arc<quarantine::QuarantineService>,
+    large_files: Mutex<HashMap<String, storage::LargeFileSnapshot>>,
     tasks: Mutex<HashMap<String, Arc<AtomicBool>>>,
     installed_apps: Mutex<apps::InstalledAppSnapshot>,
 }
@@ -93,166 +100,8 @@ fn list_disks() -> Vec<DiskInfo> {
         .collect()
 }
 
-#[tauri::command]
-fn scan_cleanup(state: State<AppState>) -> Vec<CleanupItem> {
-    let snapshots = scanner::scan();
-    let items = snapshots
-        .iter()
-        .map(|snapshot| snapshot.item().clone())
-        .collect::<Vec<_>>();
-    let mut known = state.scanned.lock();
-    known.clear();
-    for snapshot in snapshots {
-        known.insert(snapshot.item().id.clone(), snapshot);
-    }
-    items
-}
-
-fn validate_irreversible_confirmations(
-    item_ids: &[String],
-    confirmed_irreversible_item_ids: &[String],
-    irreversible_item_ids: &[&str],
-) -> Result<(), String> {
-    let planned = item_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-    let confirmed = confirmed_irreversible_item_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    let irreversible = irreversible_item_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    if confirmed.len() != confirmed_irreversible_item_ids.len()
-        || confirmed.iter().any(|id| !planned.contains(id))
-        || confirmed.iter().any(|id| !irreversible.contains(id))
-    {
-        return Err("不可恢复内容确认列表无效".into());
-    }
-    if irreversible_item_ids
-        .iter()
-        .any(|id| !confirmed.contains(id))
-    {
-        return Err("清理计划包含未明确确认的不可恢复内容".into());
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn execute_cleanup(
-    request: ExecuteRequest,
-    state: State<AppState>,
-) -> Result<ExecuteResult, String> {
-    if !request.confirmed {
-        return Err("必须确认清理操作".into());
-    }
-    if request.item_ids.is_empty() || request.item_ids.len() > 100 {
-        return Err("清理计划必须包含 1 到 100 个规则条目".into());
-    }
-    {
-        let known = state.scanned.lock();
-        let irreversible_item_ids = request
-            .item_ids
-            .iter()
-            .filter(|id| {
-                known
-                    .get(*id)
-                    .is_some_and(|snapshot| matches!(&snapshot.item().risk, RiskLevel::High))
-            })
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        validate_irreversible_confirmations(
-            &request.item_ids,
-            &request.confirmed_irreversible_item_ids,
-            &irreversible_item_ids,
-        )?;
-    }
-
-    let mut record =
-        audit::OperationRecord::new(audit::OperationKind::Cleanup, CLEANUP_RULE_VERSION);
-    let mut result = ExecuteResult {
-        reclaimed_bytes: 0,
-        succeeded: 0,
-        failed: Vec::new(),
-    };
-    let mut seen = HashSet::new();
-    let mut queued = Vec::new();
-
-    {
-        let mut known = state.scanned.lock();
-        for id in request.item_ids {
-            if !seen.insert(id.clone()) {
-                let error = "清理计划包含重复条目".to_string();
-                result.failed.push(ItemFailure {
-                    id: id.clone(),
-                    error: error.clone(),
-                    path: None,
-                });
-                record.failed.push(audit::OperationDetail {
-                    item_id: id,
-                    path: None,
-                    bytes: 0,
-                    detail: error,
-                });
-                continue;
-            }
-            match known.remove(&id) {
-                Some(snapshot) => queued.push((id, snapshot)),
-                None => {
-                    let error = "条目不属于最近一次扫描或计划已执行".to_string();
-                    result.failed.push(ItemFailure {
-                        id: id.clone(),
-                        error: error.clone(),
-                        path: None,
-                    });
-                    record.failed.push(audit::OperationDetail {
-                        item_id: id,
-                        path: None,
-                        bytes: 0,
-                        detail: error,
-                    });
-                }
-            }
-        }
-    }
-
-    for (id, snapshot) in queued {
-        let outcome = scanner::execute(&snapshot);
-        result.reclaimed_bytes = result
-            .reclaimed_bytes
-            .saturating_add(outcome.reclaimed_bytes);
-        if outcome.reclaimed_bytes > 0 || outcome.failures.is_empty() {
-            record.succeeded.push(audit::OperationDetail {
-                item_id: id.clone(),
-                path: None,
-                bytes: outcome.reclaimed_bytes,
-                detail: "已按扫描快照逐文件复检并处理".into(),
-            });
-        }
-        if outcome.failures.is_empty() {
-            result.succeeded += 1;
-        } else {
-            for failure in outcome.failures {
-                let error = failure.error;
-                result.failed.push(ItemFailure {
-                    id: id.clone(),
-                    error: error.clone(),
-                    path: Some(failure.path.display().to_string()),
-                });
-                record.skipped.push(audit::OperationDetail {
-                    item_id: id.clone(),
-                    path: None,
-                    bytes: 0,
-                    detail: error,
-                });
-            }
-        }
-    }
-
-    record.reclaimed_bytes = result.reclaimed_bytes;
-    record.completed_at_ms = audit::unix_time_ms();
-    record.status = audit_status(&record);
-    persist_audit(&record);
-    Ok(result)
+fn emit_large_file_delete_progress(app: &AppHandle, progress: LargeFileDeleteProgress) {
+    let _ = app.emit("large-file-delete-progress", progress);
 }
 
 fn audit_status(record: &audit::OperationRecord) -> audit::OperationStatus {
@@ -314,12 +163,175 @@ async fn scan_large_files(
     let root = PathBuf::from(request.root);
     let options = request.options;
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        storage::scan_large_files(&root, options, &cancel)
+        storage::scan_large_files_with_snapshots(&root, options, &cancel)
     })
     .await
     .map_err(|error| format!("大文件扫描任务异常结束: {error}"));
     state.finish_task(&task_id);
-    outcome?
+    let (result, snapshots) = outcome??;
+    if !result.stats.cancelled {
+        *state.large_files.lock() = snapshots;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn delete_large_files(
+    request: LargeFileDeleteRequest,
+    state: State<AppState>,
+    app: AppHandle,
+) -> Result<LargeFileDeleteResult, String> {
+    capability_policy::require(
+        capability_policy::DangerousWriteCapability::PermanentOriginalFileDelete,
+    )?;
+    if !request.confirmed_permanent {
+        return Err("必须明确确认永久删除大文件".into());
+    }
+    if request.item_ids.is_empty() || request.item_ids.len() > 2_000 {
+        return Err("大文件清理计划必须包含 1 到 2000 个条目".into());
+    }
+
+    let total = request.item_ids.len();
+    let mut result = LargeFileDeleteResult {
+        deleted_bytes: 0,
+        succeeded_ids: Vec::new(),
+        failed: Vec::new(),
+    };
+    let mut record =
+        audit::OperationRecord::new(audit::OperationKind::Cleanup, LARGE_FILE_RULE_VERSION);
+    let mut seen = HashSet::new();
+    let mut queued = Vec::new();
+
+    {
+        let mut known = state.large_files.lock();
+        for id in request.item_ids {
+            if !seen.insert(id.clone()) {
+                let error = "大文件清理计划包含重复条目".to_string();
+                result.failed.push(ItemFailure {
+                    id: id.clone(),
+                    error: error.clone(),
+                    path: None,
+                });
+                record.failed.push(audit::OperationDetail {
+                    item_id: id,
+                    path: None,
+                    bytes: 0,
+                    detail: error,
+                });
+                continue;
+            }
+            match known.remove(&id) {
+                Some(snapshot) => queued.push((id, snapshot)),
+                None => {
+                    let error = "条目不属于最近一次大文件扫描、受保护或计划已执行".to_string();
+                    result.failed.push(ItemFailure {
+                        id: id.clone(),
+                        error: error.clone(),
+                        path: None,
+                    });
+                    record.failed.push(audit::OperationDetail {
+                        item_id: id,
+                        path: None,
+                        bytes: 0,
+                        detail: error,
+                    });
+                }
+            }
+        }
+    }
+
+    let mut completed = total.saturating_sub(queued.len());
+    emit_large_file_delete_progress(
+        &app,
+        LargeFileDeleteProgress {
+            phase: "starting".into(),
+            completed,
+            total,
+            current_item_id: String::new(),
+            current_name: String::new(),
+            current_path: String::new(),
+            deleted_bytes: 0,
+            failed: result.failed.len(),
+        },
+    );
+
+    for (id, snapshot) in queued {
+        let name = snapshot.entry().name.clone();
+        let path = snapshot.entry().path.clone();
+        emit_large_file_delete_progress(
+            &app,
+            LargeFileDeleteProgress {
+                phase: "running".into(),
+                completed,
+                total,
+                current_item_id: id.clone(),
+                current_name: name.clone(),
+                current_path: path.clone(),
+                deleted_bytes: result.deleted_bytes,
+                failed: result.failed.len(),
+            },
+        );
+
+        match storage::delete_large_file(&snapshot) {
+            Ok(bytes) => {
+                result.deleted_bytes = result.deleted_bytes.saturating_add(bytes);
+                result.succeeded_ids.push(id.clone());
+                record.succeeded.push(audit::OperationDetail {
+                    item_id: id.clone(),
+                    path: Some(path.clone()),
+                    bytes,
+                    detail: "已按最近一次大文件扫描快照复检并永久删除".into(),
+                });
+            }
+            Err(error) => {
+                result.failed.push(ItemFailure {
+                    id: id.clone(),
+                    error: error.clone(),
+                    path: Some(path.clone()),
+                });
+                record.skipped.push(audit::OperationDetail {
+                    item_id: id.clone(),
+                    path: Some(path.clone()),
+                    bytes: 0,
+                    detail: error,
+                });
+            }
+        }
+        completed = completed.saturating_add(1);
+        emit_large_file_delete_progress(
+            &app,
+            LargeFileDeleteProgress {
+                phase: "item_complete".into(),
+                completed,
+                total,
+                current_item_id: id,
+                current_name: name,
+                current_path: path,
+                deleted_bytes: result.deleted_bytes,
+                failed: result.failed.len(),
+            },
+        );
+    }
+
+    emit_large_file_delete_progress(
+        &app,
+        LargeFileDeleteProgress {
+            phase: "complete".into(),
+            completed: total,
+            total,
+            current_item_id: String::new(),
+            current_name: String::new(),
+            current_path: String::new(),
+            deleted_bytes: result.deleted_bytes,
+            failed: result.failed.len(),
+        },
+    );
+
+    record.reclaimed_bytes = result.deleted_bytes;
+    record.completed_at_ms = audit::unix_time_ms();
+    record.status = audit_status(&record);
+    persist_audit(&record);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -375,6 +387,9 @@ fn uninstall_app(
     confirmed: bool,
     state: State<AppState>,
 ) -> Result<apps::LaunchResult, String> {
+    capability_policy::require(
+        capability_policy::DangerousWriteCapability::LegacyWin32UninstallLaunch,
+    )?;
     if !confirmed {
         return Err("必须确认后才能启动官方卸载器".into());
     }
@@ -497,11 +512,15 @@ pub fn run() {
             list_disks,
             partitions::list_partition_disks,
             partitions::open_windows_disk_management,
-            scan_cleanup,
-            execute_cleanup,
+            commands::cleanup::handlers::scan_cleanup_v2,
+            commands::cleanup::handlers::create_cleanup_plan,
+            commands::cleanup::handlers::execute_cleanup_plan,
+            commands::quarantine::list_quarantine_preview,
+            commands::quarantine::export_quarantine_copy_preview,
             list_operation_records,
             analyze_storage,
             scan_large_files,
+            delete_large_files,
             scan_duplicate_files,
             cancel_task,
             list_apps,
@@ -513,41 +532,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Qingpan")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_irreversible_confirmations;
-
-    #[test]
-    fn irreversible_cleanup_requires_exact_explicit_confirmations() {
-        let item_ids = vec!["safe-cache".to_string(), "wechat-chat".to_string()];
-        let irreversible = vec!["wechat-chat"];
-
-        assert!(
-            validate_irreversible_confirmations(&item_ids, &[], &irreversible)
-                .expect_err("unconfirmed user data should be rejected")
-                .contains("未明确确认")
-        );
-        assert!(validate_irreversible_confirmations(
-            &item_ids,
-            &["outside-plan".to_string()],
-            &irreversible,
-        )
-        .expect_err("out-of-plan confirmation should be rejected")
-        .contains("确认列表无效"));
-        assert!(validate_irreversible_confirmations(
-            &item_ids,
-            &["safe-cache".to_string()],
-            &irreversible,
-        )
-        .expect_err("safe items must not be mislabeled as irreversible confirmations")
-        .contains("确认列表无效"));
-        assert!(validate_irreversible_confirmations(
-            &item_ids,
-            &["wechat-chat".to_string()],
-            &irreversible,
-        )
-        .is_ok());
-    }
 }

@@ -15,7 +15,18 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import { BasketDrawer, Dialog } from './components';
+import { BasketDrawer, CleanupExecutionSummary, Dialog } from './components';
+import {
+  createCleanupPlan,
+  executeCleanupPlan,
+  scanCleanup,
+} from './features/cleanup-plan';
+import type {
+  CleanupItem,
+  CleanupPlan,
+  CleanupProgress,
+  ExecuteResult,
+} from './features/cleanup-plan';
 import {
   directories as previewDirectories,
   disks as previewDisks,
@@ -27,7 +38,7 @@ import {
 } from './mockData';
 import {
   cancelNativeTask,
-  executeCleanup,
+  deleteLargeFiles,
   isNativeRuntime,
   loadApps,
   loadDisks,
@@ -36,7 +47,6 @@ import {
   openWindowsDiskManagement,
   requestUninstall,
   revealInExplorer,
-  scanCleanup,
   scanDuplicateFiles,
   scanLargeFiles,
   scanStorageUsage,
@@ -56,6 +66,8 @@ import type {
   DirectoryUsage,
   DiskInfo,
   DuplicateGroup,
+  LargeFileDeleteProgress,
+  LargeFileDeleteResult,
   LargeFileEntry,
   OperationRecord,
   Page,
@@ -75,14 +87,6 @@ const secondaryNav: Array<{ id: Page; label: string; icon: typeof Package }> = [
   { id: 'apps', label: '应用管理', icon: Package },
   { id: 'recovery', label: '恢复与记录', icon: RotateCcw },
   { id: 'settings', label: '安全设置', icon: Settings },
-];
-
-const scanPaths = [
-  '正在读取 Windows 临时目录…',
-  '正在识别浏览器配置文件…',
-  '正在核对可重建应用缓存…',
-  '正在排除链接、同步目录与锁定文件…',
-  '正在生成不可变清理计划…',
 ];
 
 const builtInExclusionRules = [
@@ -119,6 +123,21 @@ function exclusionsWithinRoot(exclusions: string[], root: string): string[] {
   return exclusions.filter((path) => pathIsInside(path, root) && !pathIsInside(root, path));
 }
 
+function initialCleanupProgress(items: CleanupItem[]): CleanupProgress {
+  return {
+    phase: 'starting',
+    completedItems: 0,
+    totalItems: items.length,
+    completedFiles: 0,
+    totalFiles: items.reduce((sum, item) => sum + item.fileCount, 0),
+    currentItemId: '',
+    currentItemName: '',
+    currentPath: '',
+    reclaimedBytes: 0,
+    failedFiles: 0,
+  };
+}
+
 export default function App() {
   const {
     page, setPage, theme, disks, setDisks, activeDiskId, setActiveDiskId,
@@ -145,14 +164,26 @@ export default function App() {
   const [analysisTaskId, setAnalysisTaskId] = useState<string | null>(null);
   const [userExclusions, setUserExclusions] = useState<string[]>(readUserExclusions);
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
+  const [latestCleanupScanId, setLatestCleanupScanId] = useState<string | null>(null);
+  const [planningCleanup, setPlanningCleanup] = useState(false);
   const [executeOpen, setExecuteOpen] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [cleanupPlan, setCleanupPlan] = useState<CleanupPlan | null>(null);
+  const [cleanupProgress, setCleanupProgress] = useState<CleanupProgress | null>(null);
+  const [cleanupResult, setCleanupResult] = useState<ExecuteResult | null>(null);
+  const [cleanupError, setCleanupError] = useState('');
+  const [cleanupFollowUp, setCleanupFollowUp] = useState('');
   const [irreversibleConfirmed, setIrreversibleConfirmed] = useState(false);
   const [toast, setToast] = useState('');
   const activeDisk = disks.find((disk) => disk.id === activeDiskId) || disks[0] || (nativeRuntime ? unavailableDisk : previewDisks[0]);
   const selectedItems = useMemo(() => cleanupItems.filter((item) => selected.has(item.id)), [cleanupItems, selected]);
   const selectedBytes = selectedItems.reduce((sum, item) => sum + item.sizeBytes, 0);
-  const irreversibleCount = selectedItems.filter((item) => item.recoverability === 'irreversible').length;
+  const executionPlan = cleanupPlan?.items ?? [];
+  const plannedBytes = cleanupPlan?.items
+    .filter((item) => item.deleteMode !== 'quarantine')
+    .reduce((sum, item) => sum + item.sizeBytes, 0) ?? 0;
+  const plannedIrreversibleCount = cleanupPlan?.irreversibleItemIds.length ?? 0;
+  const showingExecutionSummary = executing || Boolean(cleanupResult) || Boolean(cleanupError);
   const anyReadScan = fileScanStatus === 'scanning' || analysisScanStatus === 'scanning';
 
   useEffect(() => {
@@ -165,10 +196,14 @@ export default function App() {
     loadApps().then(setInstalledApps).catch((error) => setToast(error instanceof Error ? error.message : '无法读取应用清单'));
     loadOperationRecords(50).then(setOperationRecords).catch(() => setOperationRecords(nativeRuntime ? [] : previewRecords));
     if (!nativeRuntime) {
-      void scanCleanup().then(setCleanupItems);
+      void scanCleanup().then((scan) => {
+        setLatestCleanupScanId(scan.scanId);
+        setCleanupItems(scan.items);
+        setSafeDefaults(scan.items);
+      });
       setLastScanAt('演示数据 · 尚未执行真实扫描');
     }
-  }, [nativeRuntime, setCleanupItems, setDisks, setLastScanAt]);
+  }, [nativeRuntime, setCleanupItems, setDisks, setLastScanAt, setSafeDefaults]);
 
   useEffect(() => {
     if (!toast) return;
@@ -209,55 +244,105 @@ export default function App() {
     if (scanning) return;
     setPage('cleanup');
     setScanning(true);
-    setProgress(3);
-    setScanPath(scanPaths[0]);
+    setProgress(0);
+    setScanPath('正在按签名规则执行只读扫描…');
     clearSelection();
-    let index = 0;
-    const timer = window.setInterval(() => {
-      setProgress(Math.min(88, useAppStore.getState().progress + 4));
-      index = (index + 1) % scanPaths.length;
-      setScanPath(scanPaths[index]);
-    }, 180);
     try {
-      if (!nativeRuntime) await new Promise((resolve) => window.setTimeout(resolve, 950));
-      const items = await scanCleanup();
-      window.clearInterval(timer);
-      setCleanupItems(items);
-      setSafeDefaults(items);
+      const scan = await scanCleanup();
+      setLatestCleanupScanId(scan.scanId);
+      setCleanupItems(scan.items);
+      setSafeDefaults(scan.items);
       setProgress(100);
-      setScanPath(`已建立 ${items.length} 项安全快照`);
+      setScanPath(`已建立 ${scan.items.length} 项安全快照`);
       setLastScanAt(scanTime());
-      window.setTimeout(() => setScanning(false), 420);
     } catch (error) {
-      window.clearInterval(timer);
-      setScanning(false);
       setToast(error instanceof Error ? error.message : '扫描失败，请重试');
+    } finally {
+      setScanning(false);
     }
   }
 
+  async function openExecutionReview() {
+    if (!selectedItems.length || !latestCleanupScanId || executing || planningCleanup) return;
+    const selectedIds = selectedItems.map((item) => item.id);
+    setPlanningCleanup(true);
+    setToast('正在校验扫描快照并生成清理计划…');
+    try {
+      const plan = await createCleanupPlan(latestCleanupScanId, selectedIds);
+      setCleanupPlan(plan);
+      setCleanupProgress(initialCleanupProgress(plan.items));
+      setCleanupResult(null);
+      setCleanupError('');
+      setCleanupFollowUp('');
+      setIrreversibleConfirmed(false);
+      setToast('');
+      setExecuteOpen(true);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '无法生成清理计划，请重新扫描');
+    } finally {
+      setPlanningCleanup(false);
+    }
+  }
+
+  function closeExecution() {
+    if (executing) return;
+    const followUp = cleanupFollowUp;
+    setExecuteOpen(false);
+    setIrreversibleConfirmed(false);
+    setCleanupPlan(null);
+    setCleanupProgress(null);
+    setCleanupResult(null);
+    setCleanupError('');
+    setCleanupFollowUp('');
+    if (followUp) setToast(followUp);
+  }
+
   async function runCleanup() {
-    if (!selectedItems.length || executing || (irreversibleCount > 0 && !irreversibleConfirmed)) return;
+    if (!cleanupPlan || executing || (plannedIrreversibleCount > 0 && !irreversibleConfirmed)) return;
+    const plan = cleanupPlan;
+    const ids = plan.items.map((item) => item.id);
+    const irreversibleIds = plan.irreversibleItemIds;
+    setCleanupProgress(initialCleanupProgress(plan.items));
+    setCleanupResult(null);
+    setCleanupError('');
+    setCleanupFollowUp('');
     setExecuting(true);
     try {
-      const ids = selectedItems.map((item) => item.id);
-      const irreversibleIds = selectedItems
-        .filter((item) => item.recoverability === 'irreversible')
-        .map((item) => item.id);
-      const result = await executeCleanup(ids, irreversibleIds);
+      const result = await executeCleanupPlan(plan.planId, irreversibleIds, setCleanupProgress);
+      setCleanupResult(result);
+      setCleanupProgress((current) => ({
+        ...(current || initialCleanupProgress(plan.items)),
+        phase: 'complete',
+        completedItems: plan.totalItems,
+        completedFiles: current?.totalFiles ?? plan.totalFiles,
+        currentItemId: '',
+        currentItemName: '',
+        currentPath: '',
+        reclaimedBytes: result.reclaimedBytes,
+        failedFiles: result.failed.length,
+      }));
+      removeSelected(ids);
+      setBasketOpen(false);
+
       if (nativeRuntime) {
-        const refreshed = await scanCleanup();
-        setCleanupItems(refreshed);
+        try {
+          const refreshedScan = await scanCleanup();
+          setLatestCleanupScanId(refreshedScan.scanId);
+          setCleanupItems(refreshedScan.items);
+        } catch {
+          setCleanupFollowUp('清理已完成，但待清理内容刷新失败，可重新扫描后查看');
+        }
       } else {
         setCleanupItems(cleanupItems.filter((item) => !ids.includes(item.id)));
       }
-      removeSelected(ids);
-      setExecuteOpen(false);
-      setIrreversibleConfirmed(false);
-      setBasketOpen(false);
-      setOperationRecords(await loadOperationRecords(50));
-      setToast(`已实际释放 ${formatBytes(result.reclaimedBytes)}${result.failed.length ? `，${result.failed.length} 个文件因变化或占用被保留` : ''}`);
+      try {
+        setOperationRecords(await loadOperationRecords(50));
+      } catch {
+        // Cleanup has already succeeded; history can refresh on the next app load.
+      }
     } catch (error) {
-      setToast(error instanceof Error ? error.message : '清理未执行');
+      const message = error instanceof Error ? error.message : '清理未执行';
+      setCleanupError(message);
     } finally {
       setExecuting(false);
     }
@@ -271,7 +356,7 @@ export default function App() {
     try {
       if (tab === 'large-files') {
         const result = await scanLargeFiles(taskId, activeDisk.mount, {
-          minSizeBytes: 256 * 1024 ** 2,
+          minSizeBytes: 100 * 1024 ** 2,
           maxFiles: 750_000,
           maxResults: 2_000,
           excludedPaths: exclusionsWithinRoot(userExclusions, activeDisk.mount),
@@ -298,6 +383,23 @@ export default function App() {
     } finally {
       setFileTaskId(null);
     }
+  }
+
+  async function runLargeFileDelete(
+    ids: string[],
+    onProgress: (progress: LargeFileDeleteProgress) => void,
+  ): Promise<LargeFileDeleteResult> {
+    const result = await deleteLargeFiles(ids, onProgress);
+    if (result.succeededIds.length) {
+      const deleted = new Set(result.succeededIds);
+      setDiscoveryFiles((files) => files.filter((file) => !deleted.has(file.id)));
+    }
+    try {
+      setOperationRecords(await loadOperationRecords(50));
+    } catch {
+      // The delete result is authoritative; history can refresh on the next load.
+    }
+    return result;
   }
 
   async function cancelFileScan() {
@@ -407,18 +509,33 @@ export default function App() {
       </header>
       <main className="content">
         {page === 'overview' && <Overview disk={activeDisk} items={cleanupItems} records={operationRecords} lastScanAt={lastScanAt} scanning={scanning} onScan={runScan} onNavigate={setPage} />}
-        {page === 'cleanup' && <CleanupCenter items={cleanupItems} selected={selected} scanning={scanning} progress={progress} scanPath={scanPath} onScan={runScan} onToggle={toggleItem} onOpenBasket={() => setBasketOpen(true)} />}
-        {page === 'files' && <FileDiscovery largeFiles={discoveryFiles} duplicateGroups={discoveryDuplicates} scanStatus={fileScanStatus} scannedAt={fileScannedAt || undefined} onScan={(tab) => void runFileScan(tab)} onCancel={() => void cancelFileScan()} onRevealInExplorer={(path) => void reveal(path)} onAddExclusion={addExclusion} />}
+        {page === 'cleanup' && <CleanupCenter items={cleanupItems} selected={selected} scanning={scanning} progress={progress} scanPath={scanPath} disk={activeDisk} onScan={runScan} onToggle={toggleItem} onOpenBasket={() => setBasketOpen(true)} onClean={() => void openExecutionReview()} />}
+        {page === 'files' && <FileDiscovery largeFiles={discoveryFiles} duplicateGroups={discoveryDuplicates} scanStatus={fileScanStatus} scannedAt={fileScannedAt || undefined} onScan={(tab) => void runFileScan(tab)} onCancel={() => void cancelFileScan()} onDeleteLargeFiles={runLargeFileDelete} onRevealInExplorer={(path) => void reveal(path)} onAddExclusion={addExclusion} />}
         {page === 'analysis' && <StorageAnalysis disk={activeDisk} directories={analysisDirectories} categories={analysisCategories} initialPath={activeDisk.mount} scanStatus={analysisScanStatus} scannedAt={analysisScannedAt || undefined} onScan={() => void runStorageScan()} onCancel={() => void cancelStorageScan()} onAnalyzeDirectory={(directory) => void runStorageScan(directory.path, true)} />}
         {page === 'partition' && <DiskPartition disks={partitionDisks} loading={partitionLoading} error={partitionError} onRefresh={() => void refreshPartitionLayout()} onOpenDiskManagement={() => void openPartitionManager()} />}
         {page === 'apps' && <AppManagement apps={installedApps} busyAppId={busyAppId} onRequestUninstall={(app) => void uninstall(app.id)} onClearCache={(app) => { setPage('cleanup'); setToast(`请在应用缓存中复核 ${app.name} 的可重建内容`); }} />}
-        {page === 'recovery' && <RecoveryCenter records={operationRecords} onRestore={(id) => setToast(`记录 ${id} 没有可直接覆盖恢复的内容`)} />}
+        {page === 'recovery' && <RecoveryCenter auditRecords={operationRecords} />}
         {page === 'settings' && <SettingsPage protectedDirectories={protectedPaths.map((item) => item.path)} exclusionRules={[...builtInExclusionRules, ...userExclusions]} autoCleanupEnabled={false} theme={theme} setTheme={useAppStore.getState().setTheme} />}
       </main>
     </div>
 
-    {basketOpen && <BasketDrawer items={selectedItems} busy={executing} onClose={() => setBasketOpen(false)} onRemove={toggleItem} onExecute={() => { setIrreversibleConfirmed(false); setExecuteOpen(true); }} />}
-    {executeOpen && <Dialog title="确认执行这份清理计划？" danger busy={executing} confirmDisabled={irreversibleCount > 0 && !irreversibleConfirmed} confirmLabel={irreversibleCount > 0 ? '永久删除所选内容' : '复检并执行'} onClose={() => { setExecuteOpen(false); setIrreversibleConfirmed(false); }} onConfirm={runCleanup}><p>将处理 <strong>{selectedItems.length} 个规则类别</strong>，预计释放 <strong>{formatBytes(selectedBytes)}</strong>。只会删除本次扫描快照中未变化的文件。</p><div className="confirm-proof"><span><ShieldCheck /></span><div><strong>默认失败策略：跳过并保留</strong><small>文件已修改、路径变化、被占用或身份不符时不会强制删除。</small></div></div>{irreversibleCount > 0 && <><div className="confirm-warning"><ShieldCheck /><span><strong>{irreversibleCount} 项不可恢复内容</strong><small>包含微信聊天或媒体数据，执行后无法找回。</small></span></div><label className="irreversible-confirmation"><input type="checkbox" checked={irreversibleConfirmed} onChange={(event) => setIrreversibleConfirmed(event.target.checked)} /><span>我确认永久删除所选微信用户数据</span></label></>}</Dialog>}
+    {basketOpen && <BasketDrawer items={selectedItems} busy={executing || planningCleanup} onClose={() => setBasketOpen(false)} onRemove={toggleItem} onExecute={() => void openExecutionReview()} />}
+    {executeOpen && <Dialog
+      title={executing ? '正在执行清理计划' : cleanupResult ? '清理完成' : cleanupError ? '清理未完成' : '确认执行这份清理计划？'}
+      danger
+      busy={executing}
+      confirmDisabled={plannedIrreversibleCount > 0 && !irreversibleConfirmed}
+      confirmLabel={plannedIrreversibleCount > 0 ? '永久删除所选内容' : '复检并执行'}
+      hideActions={showingExecutionSummary}
+      closeDisabled={executing}
+      wide={showingExecutionSummary}
+      onClose={closeExecution}
+      onConfirm={runCleanup}
+    >
+      {showingExecutionSummary && cleanupProgress
+        ? <CleanupExecutionSummary items={executionPlan} progress={cleanupProgress} result={cleanupResult} error={cleanupError} onDone={closeExecution} />
+        : <><p>后端计划包含 <strong>{cleanupPlan?.totalItems ?? 0} 个规则类别</strong>，预计释放 <strong>{formatBytes(plannedBytes)}</strong>。执行时会按该计划保存的扫描快照逐文件复检。</p><div className="confirm-proof"><span><ShieldCheck /></span><div><strong>默认失败策略：跳过并保留</strong><small>文件已修改、路径变化、被占用或身份不符时不会强制删除。</small></div></div>{plannedIrreversibleCount > 0 && <><div className="confirm-warning"><ShieldCheck /><span><strong>{plannedIrreversibleCount} 项不可恢复内容</strong><small>包含微信聊天或媒体数据，执行后无法找回。</small></span></div><label className="irreversible-confirmation"><input type="checkbox" checked={irreversibleConfirmed} onChange={(event) => setIrreversibleConfirmed(event.target.checked)} /><span>我确认永久删除所选微信用户数据</span></label></>}</>}
+    </Dialog>}
     {toast && <div className="toast" role="status"><ShieldCheck /><span>{toast}</span><button className="icon-button" onClick={() => setToast('')} aria-label="关闭提示"><X /></button></div>}
   </div>;
 }

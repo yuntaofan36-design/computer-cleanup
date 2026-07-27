@@ -1,4 +1,7 @@
-use crate::models::AppEntry;
+use crate::{
+    capability_policy::{CapabilityPolicy, DangerousWriteCapability},
+    models::AppEntry,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -150,6 +153,14 @@ pub(crate) fn load_app_icon(request: AppIconRequest) -> Option<String> {
 pub(crate) fn launch_prepared_uninstaller(
     request: UninstallRequest,
 ) -> Result<LaunchResult, String> {
+    launch_prepared_uninstaller_with_policy(request, CapabilityPolicy::compiled())
+}
+
+fn launch_prepared_uninstaller_with_policy(
+    request: UninstallRequest,
+    policy: CapabilityPolicy,
+) -> Result<LaunchResult, String> {
+    policy.require(DangerousWriteCapability::LegacyWin32UninstallLaunch)?;
     platform::launch(&request.app_id, &request.command)
 }
 
@@ -1150,6 +1161,22 @@ mod tests {
             .expect("unknown IDs must be rejected before platform launch");
 
         assert_eq!(error, "应用不属于最近一次枚举快照");
+    }
+
+    #[test]
+    fn production_release_policy_rejects_before_starting_uninstaller() {
+        let error = launch_prepared_uninstaller_with_policy(
+            UninstallRequest {
+                app_id: "app_test".into(),
+                command: "must-not-start.exe /uninstall".into(),
+            },
+            CapabilityPolicy::production_release_for_test(),
+        )
+        .err()
+        .expect("production release must reject legacy Win32 uninstall launch");
+
+        assert!(error.contains("发布策略未启用"));
+        assert!(error.contains("未启动外部进程"));
     }
 
     #[test]

@@ -1,3 +1,7 @@
+use crate::fs_safety::{
+    file_identity_from_file, hard_link_count_from_file, has_only_default_data_stream,
+    is_link_or_reparse, is_offline_or_recall, FileIdentity,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -22,7 +26,7 @@ const HASH_BUFFER_BYTES: usize = 128 * 1024;
 
 const DEFAULT_DIRECTORY_MAX_FILES: usize = 500_000;
 const DEFAULT_DIRECTORY_MAX_RESULTS: usize = 10_000;
-const DEFAULT_LARGE_FILE_MINIMUM_BYTES: u64 = 1024 * 1024 * 1024;
+const DEFAULT_LARGE_FILE_MINIMUM_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_LARGE_FILE_MAX_FILES: usize = 500_000;
 const DEFAULT_LARGE_FILE_MAX_RESULTS: usize = 2_000;
 const DEFAULT_DUPLICATE_MINIMUM_BYTES: u64 = 1024 * 1024;
@@ -176,6 +180,19 @@ pub struct LargeFileScanResult {
     pub stats: ScanStats,
 }
 
+#[derive(Clone, Debug)]
+pub struct LargeFileSnapshot {
+    entry: LargeFileEntry,
+    canonical_root: PathBuf,
+    candidate: FileCandidate,
+}
+
+impl LargeFileSnapshot {
+    pub fn entry(&self) -> &LargeFileEntry {
+        &self.entry
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DuplicateMember {
@@ -233,12 +250,6 @@ struct FileCandidate {
     size_bytes: u64,
     modified: Option<SystemTime>,
     identity: Option<FileIdentity>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct FileIdentity {
-    volume: u64,
-    index: [u8; 16],
 }
 
 #[derive(Clone, Copy)]
@@ -451,11 +462,11 @@ pub fn scan_directory_usage(
 ///
 /// The result is sorted by descending logical size and is bounded by
 /// `max_results`. No file is opened for content reads.
-pub fn scan_large_files(
+pub fn scan_large_files_with_snapshots(
     root: &Path,
     options: LargeFileScanOptions,
     cancel: &AtomicBool,
-) -> Result<LargeFileScanResult, String> {
+) -> Result<(LargeFileScanResult, HashMap<String, LargeFileSnapshot>), String> {
     validate_limits(options.max_files, options.max_results)?;
     let canonical_root = validate_root(root)?;
     let excluded_paths = normalize_excluded_paths(&canonical_root, &options.excluded_paths)?;
@@ -463,15 +474,19 @@ pub fn scan_large_files(
     let display_root = visible_root.display().to_string();
     let mut stats = ScanStats::default();
     if is_cancelled(cancel, &mut stats) {
-        return Ok(LargeFileScanResult {
-            root: display_root,
-            files: Vec::new(),
-            total_matched_bytes: 0,
-            stats,
-        });
+        return Ok((
+            LargeFileScanResult {
+                root: display_root,
+                files: Vec::new(),
+                total_matched_bytes: 0,
+                stats,
+            },
+            HashMap::new(),
+        ));
     }
 
     let mut files = Vec::with_capacity(options.max_results.min(4096));
+    let snapshots = RefCell::new(HashMap::new());
     let matched_count = Cell::new(0usize);
     let matched_bytes = Cell::new(0u64);
     let prune_at = options
@@ -493,8 +508,34 @@ pub fn scan_large_files(
             }
             matched_count.set(matched_count.get().saturating_add(1));
             matched_bytes.set(matched_bytes.get().saturating_add(metadata.len()));
-            let (file_type, sensitivity, note) = classify_large_file(path);
-            files.push(LargeFileEntry {
+            let mut candidate = FileCandidate {
+                path: path.to_path_buf(),
+                size_bytes: metadata.len(),
+                modified: metadata.modified().ok(),
+                identity: None,
+            };
+            let (file_type, mut sensitivity, mut note) = classify_large_file(path);
+            if sensitivity != Sensitivity::Protected {
+                match (
+                    file_identity_and_link_count(&candidate),
+                    has_only_default_data_stream(path),
+                ) {
+                    (Ok((identity, 1)), Ok(true)) => candidate.identity = Some(identity),
+                    (Ok((_identity, links)), Ok(true)) if links > 1 => {
+                        sensitivity = Sensitivity::Protected;
+                        note = Some("文件存在多个硬链接，无法准确承诺释放空间".into());
+                    }
+                    (Ok(_), Ok(false)) => {
+                        sensitivity = Sensitivity::Protected;
+                        note = Some("文件包含额外数据流，无法作为普通大文件安全删除".into());
+                    }
+                    _ => {
+                        sensitivity = Sensitivity::Protected;
+                        note = Some("无法建立稳定文件身份，当前结果仅供查看".into());
+                    }
+                }
+            }
+            let entry = LargeFileEntry {
                 id: stable_id("large", path),
                 name: path
                     .file_name()
@@ -509,26 +550,152 @@ pub fn scan_large_files(
                 file_type,
                 sensitivity,
                 note,
-            });
+            };
+            if candidate.identity.is_some() {
+                snapshots.borrow_mut().insert(
+                    entry.id.clone(),
+                    LargeFileSnapshot {
+                        entry: entry.clone(),
+                        canonical_root: canonical_root.clone(),
+                        candidate,
+                    },
+                );
+            }
+            files.push(entry);
             if files.len() >= prune_at {
                 sort_large_files(&mut files);
                 files.truncate(options.max_results);
+                let retained = files
+                    .iter()
+                    .map(|entry| entry.id.as_str())
+                    .collect::<HashSet<_>>();
+                snapshots
+                    .borrow_mut()
+                    .retain(|id, _| retained.contains(id.as_str()));
             }
         },
     );
 
     sort_large_files(&mut files);
     files.truncate(options.max_results);
+    let retained = files
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<HashSet<_>>();
+    snapshots
+        .borrow_mut()
+        .retain(|id, _| retained.contains(id.as_str()));
     if matched_count.get() > options.max_results {
         stats.limit_reached = true;
     }
 
-    Ok(LargeFileScanResult {
-        root: display_root,
-        files,
-        total_matched_bytes: matched_bytes.get(),
-        stats,
-    })
+    Ok((
+        LargeFileScanResult {
+            root: display_root,
+            files,
+            total_matched_bytes: matched_bytes.get(),
+            stats,
+        },
+        snapshots.into_inner(),
+    ))
+}
+
+#[cfg(test)]
+pub fn scan_large_files(
+    root: &Path,
+    options: LargeFileScanOptions,
+    cancel: &AtomicBool,
+) -> Result<LargeFileScanResult, String> {
+    scan_large_files_with_snapshots(root, options, cancel).map(|(result, _)| result)
+}
+
+pub fn delete_large_file(snapshot: &LargeFileSnapshot) -> Result<u64, String> {
+    if snapshot.entry.sensitivity == Sensitivity::Protected {
+        return Err("受保护文件不允许通过大文件清理删除".into());
+    }
+    let current_root = validate_root(&snapshot.canonical_root)?;
+    if current_root != snapshot.canonical_root {
+        return Err("扫描根目录在分析后发生变化".into());
+    }
+
+    validate_large_file_parent_chain(&snapshot.canonical_root, &snapshot.candidate.path)?;
+    let before = fs::symlink_metadata(&snapshot.candidate.path)
+        .map_err(|error| format!("文件在执行前已失效: {error}"))?;
+    validate_large_file_metadata(&before, &snapshot.candidate)?;
+    let canonical = fs::canonicalize(&snapshot.candidate.path)
+        .map_err(|error| format!("无法复检文件路径: {error}"))?;
+    if canonical == snapshot.canonical_root
+        || !path_is_same_or_descendant(&canonical, &snapshot.canonical_root)
+    {
+        return Err("文件已移出最近一次扫描的本地磁盘范围".into());
+    }
+    match has_only_default_data_stream(&snapshot.candidate.path) {
+        Ok(true) => {}
+        Ok(false) => return Err("文件新增了额外数据流，已安全保留".into()),
+        Err(_) => return Err("无法复检文件数据流，已安全保留".into()),
+    }
+
+    let file = File::open(&snapshot.candidate.path)
+        .map_err(|error| format!("无法打开文件进行身份复检: {error}"))?;
+    let handle_metadata = file
+        .metadata()
+        .map_err(|error| format!("无法读取打开文件的身份信息: {error}"))?;
+    validate_large_file_metadata(&handle_metadata, &snapshot.candidate)?;
+    let current_identity = file_identity_from_file(&file, &handle_metadata)
+        .map_err(|_| "无法确认文件身份，已安全保留".to_string())?;
+    if snapshot.candidate.identity != Some(current_identity) {
+        return Err("文件身份与最近一次扫描不一致，已安全保留".into());
+    }
+    let link_count = hard_link_count_from_file(&file, &handle_metadata)
+        .map_err(|_| "无法确认文件硬链接状态，已安全保留".to_string())?;
+    if link_count != 1 {
+        return Err("文件硬链接状态不允许安全删除，已安全保留".into());
+    }
+    drop(file);
+
+    let after = fs::symlink_metadata(&snapshot.candidate.path)
+        .map_err(|error| format!("文件在身份复检后已失效: {error}"))?;
+    validate_large_file_metadata(&after, &snapshot.candidate)?;
+    validate_large_file_parent_chain(&snapshot.canonical_root, &snapshot.candidate.path)?;
+    let canonical_after = fs::canonicalize(&snapshot.candidate.path)
+        .map_err(|error| format!("无法完成删除前路径复检: {error}"))?;
+    if canonical_after != canonical {
+        return Err("文件路径在复检期间发生变化，已安全保留".into());
+    }
+
+    fs::remove_file(&snapshot.candidate.path).map_err(|error| format!("永久删除失败: {error}"))?;
+    Ok(snapshot.candidate.size_bytes)
+}
+
+fn validate_large_file_metadata(
+    metadata: &Metadata,
+    candidate: &FileCandidate,
+) -> Result<(), String> {
+    if !metadata.is_file() || is_link_or_reparse(metadata) || is_offline_or_recall(metadata) {
+        return Err("文件已变为链接、云占位或非普通文件，已安全保留".into());
+    }
+    if metadata.len() != candidate.size_bytes || metadata.modified().ok() != candidate.modified {
+        return Err("文件大小或修改时间与最近一次扫描不一致，已安全保留".into());
+    }
+    Ok(())
+}
+
+fn validate_large_file_parent_chain(root: &Path, path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "文件没有有效父目录".to_string())?;
+    let relative = strip_component_prefix(parent, root)
+        .ok_or_else(|| "文件父目录不在最近一次扫描范围内".to_string())?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        let metadata =
+            fs::symlink_metadata(&current).map_err(|error| format!("文件父目录已失效: {error}"))?;
+        if !metadata.is_dir() || is_link_or_reparse(&metadata) || is_offline_or_recall(&metadata) {
+            return Err("文件父目录已变为链接、云占位或非普通目录".into());
+        }
+    }
+    Ok(())
 }
 
 /// Finds byte-for-byte duplicate files using a bounded three-stage pipeline:
@@ -1099,43 +1266,6 @@ fn is_cancelled(cancel: &AtomicBool, stats: &mut ScanStats) -> bool {
     }
 }
 
-fn is_link_or_reparse(metadata: &Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-fn is_offline_or_recall(metadata: &Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
-        const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
-        const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-        let attributes = metadata.file_attributes();
-        attributes
-            & (FILE_ATTRIBUTE_OFFLINE
-                | FILE_ATTRIBUTE_RECALL_ON_OPEN
-                | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
-            != 0
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = metadata;
-        false
-    }
-}
-
 fn classify_storage_category(path: &Path) -> CategoryDefinition {
     if contains_any_component(
         path,
@@ -1331,6 +1461,12 @@ enum HashFailure {
     Cancelled,
 }
 
+impl From<io::Error> for HashFailure {
+    fn from(_error: io::Error) -> Self {
+        Self::Skipped
+    }
+}
+
 fn sample_hash(
     candidate: &FileCandidate,
     root: &Path,
@@ -1449,6 +1585,12 @@ fn validate_after_hash(
 }
 
 fn file_identity(candidate: &FileCandidate) -> Result<FileIdentity, HashFailure> {
+    file_identity_and_link_count(candidate).map(|(identity, _)| identity)
+}
+
+fn file_identity_and_link_count(
+    candidate: &FileCandidate,
+) -> Result<(FileIdentity, u64), HashFailure> {
     let metadata = fs::symlink_metadata(&candidate.path).map_err(|_| HashFailure::Skipped)?;
     if !metadata.is_file()
         || is_link_or_reparse(&metadata)
@@ -1460,107 +1602,18 @@ fn file_identity(candidate: &FileCandidate) -> Result<FileIdentity, HashFailure>
     }
     let file = File::open(&candidate.path).map_err(|_| HashFailure::Skipped)?;
     let handle_metadata = file.metadata().map_err(|_| HashFailure::Skipped)?;
-    file_identity_from_file(&file, &handle_metadata)
-}
-
-#[cfg(windows)]
-fn file_identity_from_file(file: &File, _metadata: &Metadata) -> Result<FileIdentity, HashFailure> {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::{
-        Foundation::HANDLE,
-        Storage::FileSystem::{FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO},
-    };
-
-    let mut information = FILE_ID_INFO::default();
-    let handle = HANDLE(file.as_raw_handle());
-    unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileIdInfo,
-            &mut information as *mut _ as *mut std::ffi::c_void,
-            std::mem::size_of::<FILE_ID_INFO>() as u32,
-        )
+    if !handle_metadata.is_file()
+        || is_link_or_reparse(&handle_metadata)
+        || is_offline_or_recall(&handle_metadata)
+        || handle_metadata.len() != candidate.size_bytes
+        || handle_metadata.modified().ok() != candidate.modified
+    {
+        return Err(HashFailure::Skipped);
     }
-    .map_err(|_| HashFailure::Skipped)?;
-    Ok(FileIdentity {
-        volume: information.VolumeSerialNumber,
-        index: information.FileId.Identifier,
-    })
-}
-
-#[cfg(unix)]
-fn file_identity_from_file(_file: &File, metadata: &Metadata) -> Result<FileIdentity, HashFailure> {
-    use std::os::unix::fs::MetadataExt;
-    let mut index = [0u8; 16];
-    index[..8].copy_from_slice(&metadata.ino().to_le_bytes());
-    Ok(FileIdentity {
-        volume: metadata.dev(),
-        index,
-    })
-}
-
-#[cfg(not(any(windows, unix)))]
-fn file_identity_from_file(
-    _file: &File,
-    _metadata: &Metadata,
-) -> Result<FileIdentity, HashFailure> {
-    // Exact reclaimable-space claims require a stable file identity. Unknown
-    // platforms are deliberately unsupported instead of treating paths as files.
-    Err(HashFailure::Skipped)
-}
-
-#[cfg(windows)]
-fn has_only_default_data_stream(path: &Path) -> Result<bool, HashFailure> {
-    use std::{ffi::c_void, os::windows::ffi::OsStrExt};
-    use windows::{
-        core::{HRESULT, PCWSTR},
-        Win32::Storage::FileSystem::{
-            FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
-            WIN32_FIND_STREAM_DATA,
-        },
-    };
-
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let mut data = WIN32_FIND_STREAM_DATA::default();
-    let handle = unsafe {
-        FindFirstStreamW(
-            PCWSTR(wide.as_ptr()),
-            FindStreamInfoStandard,
-            &mut data as *mut _ as *mut c_void,
-            0,
-        )
-    }
-    .map_err(|_| HashFailure::Skipped)?;
-
-    let result = loop {
-        let end = data
-            .cStreamName
-            .iter()
-            .position(|value| *value == 0)
-            .unwrap_or(data.cStreamName.len());
-        let stream_name = String::from_utf16_lossy(&data.cStreamName[..end]);
-        if !stream_name.eq_ignore_ascii_case("::$DATA") {
-            break Ok(false);
-        }
-
-        data = WIN32_FIND_STREAM_DATA::default();
-        match unsafe { FindNextStreamW(handle, &mut data as *mut _ as *mut c_void) } {
-            Ok(()) => {}
-            Err(error) if error.code() == HRESULT::from_win32(38) => break Ok(true),
-            Err(_) => break Err(HashFailure::Skipped),
-        }
-    };
-    let _ = unsafe { FindClose(handle) };
-    result
-}
-
-#[cfg(not(windows))]
-fn has_only_default_data_stream(_path: &Path) -> Result<bool, HashFailure> {
-    Ok(true)
+    Ok((
+        file_identity_from_file(&file, &handle_metadata)?,
+        hard_link_count_from_file(&file, &handle_metadata)?,
+    ))
 }
 
 fn read_exact_cancelled(
@@ -1890,6 +1943,75 @@ mod tests {
         .expect_err("outside exclusion must fail");
 
         assert!(error.contains("不在扫描根目录内"));
+    }
+
+    #[test]
+    fn unchanged_large_file_snapshot_is_deleted_after_identity_recheck() {
+        let root = TestDirectory::new("large-delete");
+        let path = root.write("recording.mp4", b"large-video-content");
+        let (result, mut snapshots) = scan_large_files_with_snapshots(
+            &root.path,
+            LargeFileScanOptions {
+                min_size_bytes: 1,
+                max_files: 100,
+                max_results: 10,
+                excluded_paths: Vec::new(),
+            },
+            &AtomicBool::new(false),
+        )
+        .expect("scan large files with snapshots");
+        let entry = result.files.first().expect("large file result");
+        let snapshot = snapshots.remove(&entry.id).expect("executable snapshot");
+
+        let deleted = delete_large_file(&snapshot).expect("delete unchanged large file");
+
+        assert_eq!(deleted, 19);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn changed_large_file_is_retained_by_delete_recheck() {
+        let root = TestDirectory::new("large-changed");
+        let path = root.write("recording.mp4", b"before");
+        let (result, mut snapshots) = scan_large_files_with_snapshots(
+            &root.path,
+            LargeFileScanOptions {
+                min_size_bytes: 1,
+                max_files: 100,
+                max_results: 10,
+                excluded_paths: Vec::new(),
+            },
+            &AtomicBool::new(false),
+        )
+        .expect("scan large files with snapshots");
+        let entry = result.files.first().expect("large file result");
+        let snapshot = snapshots.remove(&entry.id).expect("executable snapshot");
+        fs::write(&path, b"changed and larger").expect("change large file after scan");
+
+        let error = delete_large_file(&snapshot).expect_err("changed file must be retained");
+
+        assert!(error.contains("大小或修改时间"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn protected_large_file_never_receives_an_executable_snapshot() {
+        let root = TestDirectory::new("large-protected");
+        root.write("machine.vhdx", b"virtual-disk");
+        let (result, snapshots) = scan_large_files_with_snapshots(
+            &root.path,
+            LargeFileScanOptions {
+                min_size_bytes: 1,
+                max_files: 100,
+                max_results: 10,
+                excluded_paths: Vec::new(),
+            },
+            &AtomicBool::new(false),
+        )
+        .expect("scan protected large file");
+
+        assert_eq!(result.files[0].sensitivity, Sensitivity::Protected);
+        assert!(snapshots.is_empty());
     }
 
     #[test]

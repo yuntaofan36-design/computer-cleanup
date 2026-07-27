@@ -1,10 +1,16 @@
+export type {
+  CleanupItem,
+  CleanupProgress,
+  CleanupScope,
+  Confidence,
+  DeleteMode,
+  ExecuteResult,
+  Impact,
+  Recoverability,
+  RiskLevel,
+} from './features/cleanup-plan';
+
 export type Page = 'overview' | 'cleanup' | 'files' | 'analysis' | 'partition' | 'apps' | 'recovery' | 'settings';
-export type CleanupScope = 'system' | 'browser' | 'apps' | 'wechat';
-export type RiskLevel = 'low' | 'medium' | 'high';
-export type Confidence = 'high' | 'medium' | 'low';
-export type Impact = 'none' | 'rebuild' | 'signout' | 'user_data';
-export type Recoverability = 'rebuildable' | 'recoverable' | 'irreversible' | 'protected';
-export type DeleteMode = 'permanent' | 'recycle_bin';
 
 export interface DiskInfo {
   id: string;
@@ -46,27 +52,6 @@ export interface PartitionDisk {
   isOffline: boolean;
   isReadOnly: boolean;
   partitions: DiskPartition[];
-}
-
-export interface CleanupItem {
-  id: string;
-  scope: CleanupScope;
-  category: string;
-  product: string;
-  name: string;
-  path: string;
-  description: string;
-  blockedReason?: string;
-  reason: string;
-  sizeBytes: number;
-  fileCount: number;
-  risk: RiskLevel;
-  confidence: Confidence;
-  impact: Impact;
-  recoverability: Recoverability;
-  deleteMode: DeleteMode;
-  selectable: boolean;
-  selected?: boolean;
 }
 
 export interface AppEntry {
@@ -160,12 +145,6 @@ export interface StorageCategory {
   description: string;
 }
 
-export interface ExecuteResult {
-  reclaimedBytes: number;
-  succeeded: number;
-  failed: Array<{ id: string; error: string }>;
-}
-
 export interface ScanStats {
   scannedFiles: number;
   skipped: number;
@@ -175,6 +154,23 @@ export interface ScanStats {
 
 export interface LargeFileScanResult extends ScanStats {
   files: LargeFileEntry[];
+}
+
+export interface LargeFileDeleteProgress {
+  phase: 'starting' | 'running' | 'item_complete' | 'complete';
+  completed: number;
+  total: number;
+  currentItemId: string;
+  currentName: string;
+  currentPath: string;
+  deletedBytes: number;
+  failed: number;
+}
+
+export interface LargeFileDeleteResult {
+  deletedBytes: number;
+  succeededIds: string[];
+  failed: Array<{ id: string; error: string; path?: string }>;
 }
 
 export interface DuplicateScanResult extends ScanStats {
