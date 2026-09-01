@@ -40,9 +40,10 @@ describe('large-file cleanup experience', () => {
     const { container } = render(
       <FileDiscovery largeFiles={largeFiles} duplicateGroups={[]} scanStatus='complete' />,
     );
-    const sizeFilter = screen.getByRole('combobox', { name: '大文件最小大小' }) as HTMLSelectElement;
+    const sizeFilter = screen.getByRole('combobox', { name: '大文件最小大小' });
+    fireEvent.click(sizeFilter);
 
-    expect(Array.from(sizeFilter.options).map((option) => option.textContent)).toEqual([
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
       '≥100MB',
       '≥500MB',
       '≥1GB',
@@ -50,7 +51,7 @@ describe('large-file cleanup experience', () => {
       '≥10GB',
     ]);
 
-    fireEvent.change(sizeFilter, { target: { value: String(10 * 1024 ** 3) } });
+    fireEvent.click(screen.getByRole('option', { name: '≥10GB' }));
 
     expect(screen.getByText('ext4.vhdx')).toBeTruthy();
     expect(screen.getByText('launch-film-final.mov')).toBeTruthy();

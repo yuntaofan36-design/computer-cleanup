@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { Dialog } from '../components';
 import { formatBytes } from '../format';
+import SelectMenu from '../SelectMenu';
 import type {
   DuplicateGroup,
   LargeFileDeleteProgress,
@@ -443,9 +444,9 @@ function LargeFilesExperience({
           <Search />
           <input type='search' value={query} onChange={(event) => setQuery(event.target.value)} placeholder='搜索文件名或路径' aria-label='搜索大文件' />
         </label>
-        <label className='filter-field'><span>磁盘</span><select value={drive} onChange={(event) => setDrive(event.target.value)}><option value='all'>全部磁盘</option>{drives.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
-        <label className='filter-field'><span>大小</span><select aria-label='大文件最小大小' value={minimumSize} onChange={(event) => setMinimumSize(Number(event.target.value))}>{largeFileSizeFilters.map((item) => <option value={item.value} key={item.value}>{item.label}</option>)}</select></label>
-        <label className='filter-field'><span>排序</span><select value={sort} onChange={(event) => setSort(event.target.value as LargeFileSort)}><option value='size_desc'>文件从大到小</option><option value='size_asc'>文件从小到大</option><option value='modified_desc'>最近修改优先</option></select></label>
+        <SelectMenu className='filter-field' ariaLabel='大文件所在磁盘' label='磁盘' value={drive} options={[{ value: 'all', label: '全部磁盘' }, ...drives.map((item) => ({ value: item, label: item }))]} onChange={setDrive} />
+        <SelectMenu className='filter-field' ariaLabel='大文件最小大小' label='大小' value={String(minimumSize)} options={largeFileSizeFilters.map((item) => ({ value: String(item.value), label: item.label }))} onChange={(value) => setMinimumSize(Number(value))} />
+        <SelectMenu className='filter-field' ariaLabel='大文件排序方式' label='排序' value={sort} options={[{ value: 'size_desc', label: '文件从大到小' }, { value: 'size_asc', label: '文件从小到大' }, { value: 'modified_desc', label: '最近修改优先' }]} onChange={(value) => setSort(value as LargeFileSort)} />
         <span className='large-file-safety'><ShieldCheck />执行前复检文件身份，变化项自动保留</span>
         <button className='button secondary small' type='button' disabled={scanning ? !onCancel : !onScan} onClick={() => scanning ? onCancel?.() : onScan?.()}>{scanning ? <CircleStop /> : <Search />}{scanning ? '取消分析' : '重新分析'}</button>
       </div>
@@ -682,14 +683,14 @@ export default function FileDiscovery({
             aria-label='搜索分析结果'
           />
         </label>
-        <label className='filter-field'>
-          <span>可释放空间</span>
-          <select value={minimumSize} onChange={(event) => setMinimumSize(Number(event.target.value))}>
-            {duplicateSizeFilters.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
+        <SelectMenu
+          className='filter-field'
+          ariaLabel='重复文件可释放空间'
+          label='可释放空间'
+          value={String(minimumSize)}
+          options={duplicateSizeFilters.map((option) => ({ value: String(option.value), label: option.label }))}
+          onChange={(value) => setMinimumSize(Number(value))}
+        />
         <span className='toolbar-help' title='筛选只改变当前显示结果'>
           <Info size={16} /> 筛选不会修改文件
         </span>

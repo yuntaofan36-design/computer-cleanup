@@ -10,7 +10,10 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{
     fs::{self, File, Metadata},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        OnceLock,
+    },
     time::{Duration, SystemTime},
 };
 use sysinfo::{ProcessesToUpdate, System};
@@ -33,12 +36,11 @@ const TEMP_MINIMUM_AGE: Duration = Duration::from_secs(72 * 60 * 60);
 /// | 16      | 7.20    |
 /// | 32      | 6.28    |
 ///
-/// Sixteen roughly doubles eight's throughput because the extra threads overlap
-/// scan latency rather than compete for cores. Thirty-two adds only 15% more, so
-/// the cap stays at sixteen to leave the machine responsive while a scan runs.
-/// The pool is also capped by the actual candidate count, so small rules never
-/// spawn idle threads.
-const MAX_SNAPSHOT_VERIFY_THREADS: usize = 16;
+/// Eight keeps most of the measured parallel speed-up without consuming every
+/// logical processor on a common 8C/16T desktop. The actual pool is smaller on
+/// lower-core machines and always leaves at least one logical processor available
+/// for the Tauri event loop and WebView2 window threads.
+const MAX_SNAPSHOT_VERIFY_THREADS: usize = 8;
 
 /// Candidate count below which verification stays on the calling thread.
 ///
@@ -1334,11 +1336,26 @@ fn stable_file_identity(
     file_identity_from_file(&file, &handle_metadata).ok()
 }
 
+#[cfg(test)]
 fn snapshot_directory(
     root: &Path,
     rule: &Rule,
     scan_started_at: SystemTime,
 ) -> Result<DirectorySnapshot, String> {
+    let cancel = AtomicBool::new(false);
+    snapshot_directory_cancellable(root, rule, scan_started_at, &cancel)?
+        .ok_or_else(|| "清理扫描已取消".to_string())
+}
+
+fn snapshot_directory_cancellable(
+    root: &Path,
+    rule: &Rule,
+    scan_started_at: SystemTime,
+    cancel: &AtomicBool,
+) -> Result<Option<DirectorySnapshot>, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
     let root_metadata =
         fs::symlink_metadata(root).map_err(|error| format!("无法读取清理目录: {error}"))?;
     if is_link_or_reparse(&root_metadata)
@@ -1368,6 +1385,9 @@ fn snapshot_directory(
                     .unwrap_or(false)
         });
     for entry in entries {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         let Ok(entry) = entry else {
             continue;
         };
@@ -1396,6 +1416,10 @@ fn snapshot_directory(
         candidates.push((path, metadata, modified));
     }
 
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+
     // Phase 2: resolve each candidate's real path and pin its identity. These are
     // the expensive per-file steps (a handle open plus stream enumeration dominates
     // scan cost at roughly 39s per 30k files single-threaded, versus 5.6s across
@@ -1405,38 +1429,61 @@ fn snapshot_directory(
     //
     // Both branches call the same verifier, so a file rejected serially is rejected
     // identically in parallel; only the thread it runs on differs.
-    let mut files: Vec<FileSnapshot> =
-        if candidates.len() < MIN_CANDIDATES_FOR_PARALLEL_VERIFY {
-            candidates
-                .into_iter()
-                .filter_map(|candidate| verify_candidate(candidate, &canonical_root))
-                .collect()
-        } else {
-            match verification_pool() {
-                Some(pool) => pool.install(|| {
-                    candidates
-                        .into_par_iter()
-                        .filter_map(|candidate| verify_candidate(candidate, &canonical_root))
-                        .collect()
-                }),
-                // A pool is an optimisation, never a correctness requirement: if the
-                // OS refuses the threads, verify on this thread instead of failing
-                // the scan.
-                None => candidates
-                    .into_iter()
-                    .filter_map(|candidate| verify_candidate(candidate, &canonical_root))
-                    .collect(),
+    let mut files: Vec<FileSnapshot> = if candidates.len() < MIN_CANDIDATES_FOR_PARALLEL_VERIFY {
+        let mut files = Vec::new();
+        for candidate in candidates {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(None);
             }
-        };
+            if let Some(file) = verify_candidate(candidate, &canonical_root) {
+                files.push(file);
+            }
+        }
+        files
+    } else {
+        match verification_pool() {
+            Some(pool) => pool.install(|| {
+                candidates
+                    .into_par_iter()
+                    .filter_map(|candidate| {
+                        if cancel.load(Ordering::Relaxed) {
+                            None
+                        } else {
+                            verify_candidate(candidate, &canonical_root)
+                        }
+                    })
+                    .collect()
+            }),
+            // A pool is an optimisation, never a correctness requirement: if the
+            // OS refuses the threads, verify on this thread instead of failing
+            // the scan.
+            None => {
+                let mut files = Vec::new();
+                for candidate in candidates {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(None);
+                    }
+                    if let Some(file) = verify_candidate(candidate, &canonical_root) {
+                        files.push(file);
+                    }
+                }
+                files
+            }
+        }
+    };
+
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
 
     // Sorting after collection restores a deterministic order that does not depend
     // on how work was distributed across threads.
     files.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(DirectorySnapshot {
+    Ok(Some(DirectorySnapshot {
         root: root.to_path_buf(),
         canonical_root,
         files,
-    })
+    }))
 }
 
 /// Returns the process-wide verification pool, building it at most once.
@@ -1449,13 +1496,44 @@ fn verification_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
     POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
-            .num_threads(MAX_SNAPSHOT_VERIFY_THREADS)
+            .num_threads(snapshot_verify_thread_count())
             .thread_name(|index| format!("qingpan-verify-{index}"))
+            .start_handler(|_| lower_current_scan_thread_priority())
             .build()
             .ok()
     })
     .as_ref()
 }
+
+fn snapshot_verify_thread_count_for(logical_processors: usize) -> usize {
+    logical_processors
+        .saturating_sub(1)
+        .clamp(1, MAX_SNAPSHOT_VERIFY_THREADS)
+}
+
+fn snapshot_verify_thread_count() -> usize {
+    let logical_processors = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(2);
+    snapshot_verify_thread_count_for(logical_processors)
+}
+
+#[cfg(windows)]
+fn lower_current_scan_thread_priority() {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+    };
+
+    // These are dedicated Rayon workers used only for read-only snapshot checks.
+    // If Windows refuses the best-effort priority change, scanning remains correct;
+    // it merely loses the responsiveness hint.
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+#[cfg(not(windows))]
+fn lower_current_scan_thread_priority() {}
 
 /// Confirms a candidate still resolves inside `canonical_root` and pins its
 /// identity, or rejects it.
@@ -1481,6 +1559,7 @@ fn verify_candidate(
     })
 }
 
+#[cfg(test)]
 fn scan_with_environment(
     local_root: Option<&Path>,
     roaming_root: Option<&Path>,
@@ -1489,37 +1568,78 @@ fn scan_with_environment(
     xwechat_data_root: Option<&Path>,
     process_names: Option<&[String]>,
 ) -> Vec<CleanupSnapshot> {
-    let scan_started_at = SystemTime::now();
+    let cancel = AtomicBool::new(false);
+    scan_with_environment_cancellable(
+        local_root,
+        roaming_root,
+        home_root,
+        wechat_documents_root,
+        xwechat_data_root,
+        process_names,
+        &cancel,
+    )
+    .unwrap_or_default()
+}
 
-    rules_for_roots(
+fn scan_with_environment_cancellable(
+    local_root: Option<&Path>,
+    roaming_root: Option<&Path>,
+    home_root: Option<&Path>,
+    wechat_documents_root: Option<&Path>,
+    xwechat_data_root: Option<&Path>,
+    process_names: Option<&[String]>,
+    cancel: &AtomicBool,
+) -> Option<Vec<CleanupSnapshot>> {
+    let scan_started_at = SystemTime::now();
+    let mut snapshots = Vec::new();
+
+    for rule in rules_for_roots(
         local_root,
         roaming_root,
         wechat_documents_root,
         xwechat_data_root,
-    )
-    .into_iter()
-    .filter(|rule| rule_can_be_scanned(rule, process_names))
-    .filter_map(|rule| {
-        let base_root = base_root_for(
+    ) {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        if !rule_can_be_scanned(&rule, process_names) {
+            continue;
+        }
+        let Some(base_root) = base_root_for(
             &rule,
             local_root,
             roaming_root,
             home_root,
             wechat_documents_root,
             xwechat_data_root,
-        )?;
-        let canonical_base_root = fs::canonicalize(base_root).ok()?;
+        ) else {
+            continue;
+        };
+        let Ok(canonical_base_root) = fs::canonicalize(base_root) else {
+            continue;
+        };
         let root = base_root.join(&rule.relative);
-        validate_rule_directory_chain(base_root, &root).ok()?;
-        let directory = snapshot_directory(&root, &rule, scan_started_at).ok()?;
+        if validate_rule_directory_chain(base_root, &root).is_err() {
+            continue;
+        }
+        let directory = match snapshot_directory_cancellable(
+            &root,
+            &rule,
+            scan_started_at,
+            cancel,
+        ) {
+            Ok(Some(directory)) => directory,
+            Ok(None) => return None,
+            Err(_) => continue,
+        };
         if directory.canonical_root == canonical_base_root
             || !directory.canonical_root.starts_with(&canonical_base_root)
         {
-            return None;
+            continue;
         }
 
         if directory.files.is_empty() {
-            return None;
+            continue;
         }
         let size_bytes = directory.files.iter().map(|file| file.size).sum();
         let file_count = directory.files.len();
@@ -1555,30 +1675,42 @@ fn scan_with_environment(
             },
         };
 
-        Some(CleanupSnapshot {
+        snapshots.push(CleanupSnapshot {
             item,
             root: directory.root,
             canonical_root: directory.canonical_root,
             files: directory.files,
-        })
-    })
-    .collect()
+        });
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        None
+    } else {
+        Some(snapshots)
+    }
 }
 
-pub fn scan() -> Vec<CleanupSnapshot> {
+pub fn scan(cancel: &AtomicBool) -> Option<Vec<CleanupSnapshot>> {
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     let local_root = local_root();
     let roaming_root = roaming_root();
     let home_root = home_root();
     let wechat_documents_root = wechat_documents_root();
     let xwechat_data_root = xwechat_data_root();
     let process_names = running_process_names();
-    scan_with_environment(
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    scan_with_environment_cancellable(
         local_root.as_deref(),
         roaming_root.as_deref(),
         home_root.as_deref(),
         wechat_documents_root.as_deref(),
         xwechat_data_root.as_deref(),
         process_names.as_deref(),
+        cancel,
     )
 }
 
@@ -2937,6 +3069,41 @@ mod tests {
             !paths.contains(&tagged),
             "file with an alternate data stream must be excluded"
         );
+    }
+
+    #[test]
+    fn snapshot_verification_reserves_capacity_for_window_threads() {
+        assert_eq!(snapshot_verify_thread_count_for(1), 1);
+        assert_eq!(snapshot_verify_thread_count_for(2), 1);
+        assert_eq!(snapshot_verify_thread_count_for(4), 3);
+        assert_eq!(snapshot_verify_thread_count_for(16), 8);
+        assert_eq!(snapshot_verify_thread_count_for(64), 8);
+
+        let available = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(2);
+        let workers = snapshot_verify_thread_count();
+        assert!((1..=MAX_SNAPSHOT_VERIFY_THREADS).contains(&workers));
+        if available > 1 {
+            assert!(workers < available);
+        }
+    }
+
+    #[test]
+    fn cancelled_cleanup_scan_returns_no_partial_snapshot() {
+        let cancel = AtomicBool::new(true);
+
+        let snapshots = scan_with_environment_cancellable(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&[]),
+            &cancel,
+        );
+
+        assert!(snapshots.is_none());
     }
 
     /// The parallel verification path must be indistinguishable from the serial

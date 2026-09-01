@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const CLEANUP_RULE_VERSION: &str = "cleanup-rules-v4";
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CleanupScanRequest {
+    pub task_id: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CleanupScanResponse {

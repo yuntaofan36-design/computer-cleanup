@@ -58,9 +58,11 @@ describe('cleanup plan native API', () => {
       items: [nativeItem],
     });
 
-    const scan = await scanCleanup();
+    const scan = await scanCleanup('11111111-1111-4111-8111-111111111111');
 
-    expect(invokeMock).toHaveBeenCalledWith('scan_cleanup_v2');
+    expect(invokeMock).toHaveBeenCalledWith('scan_cleanup_v2', {
+      request: { taskId: '11111111-1111-4111-8111-111111111111' },
+    });
     expect(scan.scanId).toBe('scan-1');
     expect(scan.items[0]).toMatchObject({ id: 'browser-cache', scope: 'browser', selectable: true });
   });
@@ -73,7 +75,7 @@ describe('cleanup plan native API', () => {
       items: [{ ...nativeItem, id: 'temp', deleteMode: 'quarantine' }],
     });
 
-    const scan = await scanCleanup();
+    const scan = await scanCleanup('22222222-2222-4222-8222-222222222222');
 
     expect(scan.items[0]).toMatchObject({
       id: 'temp',
@@ -162,12 +164,12 @@ describe('cleanup plan preview adapter', () => {
   });
 
   it('keeps an existing plan valid across a later scan and consumes it once', async () => {
-    const firstScan = await scanCleanup();
+    const firstScan = await scanCleanup('33333333-3333-4333-8333-333333333333');
     const selected = firstScan.items.find((item) => item.id === 'temp');
     expect(selected).toBeDefined();
     const plan = await createCleanupPlan(firstScan.scanId, [selected!.id]);
 
-    const secondScan = await scanCleanup();
+    const secondScan = await scanCleanup('44444444-4444-4444-8444-444444444444');
     expect(secondScan.scanId).not.toBe(firstScan.scanId);
 
     const result = await executeCleanupPlan(plan.planId, plan.irreversibleItemIds);
@@ -182,7 +184,7 @@ describe('cleanup plan preview adapter', () => {
   });
 
   it('does not consume a plan when irreversible confirmations are invalid', async () => {
-    const scan = await scanCleanup();
+    const scan = await scanCleanup('55555555-5555-4555-8555-555555555555');
     const selected = scan.items.find((item) => item.selectable);
     expect(selected).toBeDefined();
     const plan = await createCleanupPlan(scan.scanId, [selected!.id]);

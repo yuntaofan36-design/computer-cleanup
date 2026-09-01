@@ -1,7 +1,7 @@
 use crate::{
     cleanup_plan::{
-        self, CleanupPlanPreview, CleanupScanResponse, CreateCleanupPlanRequest,
-        ExecuteCleanupPlanRequest, CLEANUP_RULE_VERSION,
+        self, CleanupPlanPreview, CleanupScanRequest, CleanupScanResponse,
+        CreateCleanupPlanRequest, ExecuteCleanupPlanRequest, CLEANUP_RULE_VERSION,
     },
     models::ExecuteResult,
     scanner, AppState,
@@ -9,10 +9,22 @@ use crate::{
 use tauri::{AppHandle, State};
 
 #[tauri::command]
-pub(crate) fn scan_cleanup_v2(state: State<'_, AppState>) -> Result<CleanupScanResponse, String> {
+pub(crate) async fn scan_cleanup_v2(
+    request: CleanupScanRequest,
+    state: State<'_, AppState>,
+) -> Result<CleanupScanResponse, String> {
+    let cancel = state.begin_task(&request.task_id)?;
+    let task_id = request.task_id;
+    let outcome = tauri::async_runtime::spawn_blocking(move || scanner::scan(&cancel)).await;
+    state.finish_task(&task_id);
+
+    let snapshots = outcome
+        .map_err(|error| format!("清理扫描任务异常结束: {error}"))?
+        .ok_or_else(|| "清理扫描已取消".to_string())?;
+
     state
         .cleanup_plans
-        .record_scan(CLEANUP_RULE_VERSION, scanner::scan())
+        .record_scan(CLEANUP_RULE_VERSION, snapshots)
 }
 
 #[tauri::command]

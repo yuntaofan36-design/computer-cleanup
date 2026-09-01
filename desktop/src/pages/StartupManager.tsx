@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { EmptyState } from '../components';
 import type { StartupEntry } from '../types';
+import { StartupApplicationIcon } from './ApplicationIcon';
 
 export interface StartupManagerProps {
   entries: StartupEntry[];
@@ -167,8 +168,9 @@ export default function StartupManager({
               const nextState = !entry.enabled;
               return (
                 <div className="list-row" key={entry.id}>
-                  <span className={`row-icon ${entry.enabled ? 'status-success' : ''}`} aria-hidden="true">
-                    {isBusy ? <LoaderCircle className="spin" /> : entry.enabled ? <Power /> : <PowerOff />}
+                  <span className="startup-app-icon">
+                    <StartupApplicationIcon startupId={entry.id} name={entry.name} />
+                    {isBusy && <span className="startup-icon-busy" aria-hidden="true"><LoaderCircle className="spin" /></span>}
                   </span>
                   <span className="grow operation-description">
                     <strong>{entry.name}<span className="badge">{entry.scope}</span></strong>

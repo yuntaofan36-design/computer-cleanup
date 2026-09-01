@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  ChevronDown,
   Grid2X2,
   HardDrive,
   LayoutDashboard,
@@ -53,6 +52,7 @@ import {
   scanStorageUsage,
   setStartupEntryEnabled,
 } from './native';
+import SelectMenu from './SelectMenu';
 import AppManagement from './pages/AppManagement';
 import CleanupCenter from './pages/CleanupCenter';
 import FileDiscovery, { type FileDiscoveryTab } from './pages/FileDiscovery';
@@ -177,6 +177,8 @@ export default function App() {
   const [busyStartupId, setBusyStartupId] = useState<string | null>(null);
   const [startupError, setStartupError] = useState('');
   const [latestCleanupScanId, setLatestCleanupScanId] = useState<string | null>(null);
+  const [cleanupScanTaskId, setCleanupScanTaskId] = useState<string | null>(null);
+  const [cleanupScanCancelling, setCleanupScanCancelling] = useState(false);
   const [planningCleanup, setPlanningCleanup] = useState(false);
   const [executeOpen, setExecuteOpen] = useState(false);
   const [executing, setExecuting] = useState(false);
@@ -222,7 +224,7 @@ export default function App() {
     loadStartupEntries().then(setStartupEntries).catch((error) => setStartupError(error instanceof Error ? error.message : '无法读取启动项'));
     loadOperationRecords(50).then(setOperationRecords).catch(() => setOperationRecords(nativeRuntime ? [] : previewRecords));
     if (!nativeRuntime) {
-      void scanCleanup().then((scan) => {
+      void scanCleanup(crypto.randomUUID()).then((scan) => {
         const visibleItems = scan.items.filter((item) => !userExclusions.some((path) => pathsOverlap(item.path, path)));
         setLatestCleanupScanId(scan.scanId);
         setCleanupItems(visibleItems);
@@ -269,13 +271,16 @@ export default function App() {
 
   async function runScan() {
     if (scanning) return;
+    const taskId = crypto.randomUUID();
     setPage('cleanup');
+    setCleanupScanTaskId(taskId);
+    setCleanupScanCancelling(false);
     setScanning(true);
     setProgress(0);
     setScanPath('正在按签名规则执行只读扫描…');
     clearSelection();
     try {
-      const scan = await scanCleanup();
+      const scan = await scanCleanup(taskId);
       const visibleItems = scan.items.filter((item) => !userExclusions.some((path) => pathsOverlap(item.path, path)));
       setLatestCleanupScanId(scan.scanId);
       setCleanupItems(visibleItems);
@@ -284,9 +289,33 @@ export default function App() {
       setScanPath(`已建立 ${visibleItems.length} 项安全快照`);
       setLastScanAt(scanTime());
     } catch (error) {
-      setToast(error instanceof Error ? error.message : '扫描失败，请重试');
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+          ? error
+          : '扫描失败，请重试';
+      if (message.includes('清理扫描已取消')) {
+        setScanPath('扫描已终止，保留上次结果');
+        setToast('扫描已终止，保留上次结果');
+      } else {
+        setToast(message);
+      }
     } finally {
+      setCleanupScanTaskId(null);
+      setCleanupScanCancelling(false);
       setScanning(false);
+    }
+  }
+
+  async function cancelCleanupScan() {
+    if (!cleanupScanTaskId || cleanupScanCancelling) return;
+    setCleanupScanCancelling(true);
+    setScanPath('正在安全终止扫描…');
+    try {
+      await cancelNativeTask(cleanupScanTaskId);
+    } catch (error) {
+      setCleanupScanCancelling(false);
+      setToast(error instanceof Error ? error.message : '无法终止扫描，请稍后重试');
     }
   }
 
@@ -354,7 +383,7 @@ export default function App() {
 
       if (nativeRuntime) {
         try {
-          const refreshedScan = await scanCleanup();
+          const refreshedScan = await scanCleanup(crypto.randomUUID());
           const visibleItems = refreshedScan.items.filter((item) => !userExclusions.some((path) => pathsOverlap(item.path, path)));
           setLatestCleanupScanId(refreshedScan.scanId);
           setCleanupItems(visibleItems);
@@ -587,14 +616,14 @@ export default function App() {
     <div className="app-stage">
       <header className="topbar">
         <div className="page-identity"><small>Lumina Clean</small><strong>{currentPageLabel[page]}</strong></div>
-        <label className="drive-select" aria-label="选择磁盘"><span><HardDrive /></span><div><small>当前磁盘</small><strong>{activeDisk.name} ({activeDisk.mount || '--'})</strong></div><select value={activeDiskId} disabled={anyReadScan || scanning} onChange={(event) => setActiveDiskId(event.target.value)}>{disks.map((disk) => <option key={disk.id} value={disk.id}>{disk.name} ({disk.mount})</option>)}</select><ChevronDown /></label>
+        <SelectMenu className="drive-select" ariaLabel="选择磁盘" label="当前磁盘" leading={<HardDrive />} value={activeDiskId} options={disks.map((disk) => ({ value: disk.id, label: `${disk.name} (${disk.mount})` }))} disabled={anyReadScan || scanning || !disks.length} placeholder={`${activeDisk.name} (${activeDisk.mount || '--'})`} onChange={setActiveDiskId} />
         <div className="topbar-status"><span className="live-dot" />仅在本机运行</div>
         <button className="icon-button top-icon" type="button" onClick={cycleTheme} aria-label={`当前${themeLabel}，切换主题`} title={`主题：${themeLabel}`}><ThemeIcon /></button>
         <button className="basket-button" type="button" onClick={() => setBasketOpen(true)} aria-label={`清理篮，${selected.size} 项`}><ShoppingBasket /><span><small>清理篮</small><strong>{selected.size ? `${selected.size} 项 · ${formatBytes(selectedBytes)}` : '未选择'}</strong></span>{selected.size > 0 && <b>{selected.size}</b>}</button>
       </header>
       <main className="content">
         {page === 'overview' && <Overview disk={activeDisk} items={cleanupItems} records={operationRecords} lastScanAt={lastScanAt} scanning={scanning} onScan={runScan} onNavigate={setPage} />}
-        {page === 'cleanup' && <CleanupCenter items={cleanupItems} selected={selected} scanning={scanning} progress={progress} scanPath={scanPath} disk={activeDisk} onScan={runScan} onToggle={toggleItem} onOpenBasket={() => setBasketOpen(true)} onClean={() => void openExecutionReview()} />}
+        {page === 'cleanup' && <CleanupCenter items={cleanupItems} selected={selected} scanning={scanning} scanCancelling={cleanupScanCancelling} progress={progress} scanPath={scanPath} disk={activeDisk} onScan={runScan} onCancelScan={() => void cancelCleanupScan()} onToggle={toggleItem} onOpenBasket={() => setBasketOpen(true)} onClean={() => void openExecutionReview()} />}
         {page === 'tools' && <Toolbox largeFileCount={discoveryFiles.length} duplicateGroupCount={discoveryDuplicates.length} appCount={installedApps.length} startupCount={startupEntries.length} analyzedDirectoryCount={analysisDirectories.length} onOpenFileDiscovery={openFileDiscovery} onNavigate={setPage} />}
         {page === 'files' && <FileDiscovery initialTab={fileDiscoveryTab} largeFiles={discoveryFiles} duplicateGroups={discoveryDuplicates} scanStatus={fileScanStatus} scannedAt={fileScannedAt || undefined} onScan={(tab) => void runFileScan(tab)} onCancel={() => void cancelFileScan()} onDeleteLargeFiles={runLargeFileDelete} onRevealInExplorer={(path) => void reveal(path)} onAddExclusion={addExclusion} />}
         {page === 'analysis' && <StorageAnalysis disk={activeDisk} directories={analysisDirectories} categories={analysisCategories} initialPath={activeDisk.mount} scanStatus={analysisScanStatus} scannedAt={analysisScannedAt || undefined} onScan={() => void runStorageScan()} onCancel={() => void cancelStorageScan()} onAnalyzeDirectory={(directory) => void runStorageScan(directory.path, true)} />}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { loadAppIcon } from '../native';
+import { loadAppIcon, loadStartupIcon } from '../native';
 
 export interface ApplicationIconProps {
   appId: string;
@@ -7,15 +7,21 @@ export interface ApplicationIconProps {
 }
 
 interface LoadedIcon {
-  appId: string;
+  id: string;
   dataUrl: string | null;
+}
+
+interface NativeApplicationIconProps {
+  id: string;
+  name: string;
+  loadIcon: (id: string) => Promise<string | null>;
 }
 
 function fallbackLabel(name: string): string {
   return Array.from(name.trim())[0]?.toLocaleUpperCase() ?? '?';
 }
 
-export function ApplicationIcon({ appId, name }: ApplicationIconProps): JSX.Element {
+function NativeApplicationIcon({ id, name, loadIcon }: NativeApplicationIconProps): JSX.Element {
   const containerRef = useRef<HTMLSpanElement>(null);
   const [loadedIcon, setLoadedIcon] = useState<LoadedIcon | null>(null);
   const [failedDataUrl, setFailedDataUrl] = useState<string | null>(null);
@@ -25,12 +31,12 @@ export function ApplicationIcon({ appId, name }: ApplicationIconProps): JSX.Elem
     let disposed = false;
 
     const requestIcon = (): void => {
-      void loadAppIcon(appId)
+      void loadIcon(id)
         .then((dataUrl) => {
-          if (!disposed) setLoadedIcon({ appId, dataUrl });
+          if (!disposed) setLoadedIcon({ id, dataUrl });
         })
         .catch(() => {
-          if (!disposed) setLoadedIcon({ appId, dataUrl: null });
+          if (!disposed) setLoadedIcon({ id, dataUrl: null });
         });
     };
 
@@ -52,9 +58,9 @@ export function ApplicationIcon({ appId, name }: ApplicationIconProps): JSX.Elem
       disposed = true;
       observer.disconnect();
     };
-  }, [appId]);
+  }, [id, loadIcon]);
 
-  const dataUrl = loadedIcon?.appId === appId ? loadedIcon.dataUrl : null;
+  const dataUrl = loadedIcon?.id === id ? loadedIcon.dataUrl : null;
   const showImage = dataUrl !== null && failedDataUrl !== dataUrl;
 
   return (
@@ -74,4 +80,17 @@ export function ApplicationIcon({ appId, name }: ApplicationIconProps): JSX.Elem
       ) : fallbackLabel(name)}
     </span>
   );
+}
+
+export function ApplicationIcon({ appId, name }: ApplicationIconProps): JSX.Element {
+  return <NativeApplicationIcon id={appId} name={name} loadIcon={loadAppIcon} />;
+}
+
+export interface StartupApplicationIconProps {
+  startupId: string;
+  name: string;
+}
+
+export function StartupApplicationIcon({ startupId, name }: StartupApplicationIconProps): JSX.Element {
+  return <NativeApplicationIcon id={startupId} name={name} loadIcon={loadStartupIcon} />;
 }

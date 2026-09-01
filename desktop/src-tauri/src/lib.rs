@@ -432,6 +432,14 @@ fn list_startup_entries() -> Vec<StartupEntry> {
     startup_platform::startups()
 }
 
+#[tauri::command]
+async fn get_startup_icon(id: String) -> Result<Option<String>, String> {
+    let command = startup_platform::icon_command(&id)?;
+    tauri::async_runtime::spawn_blocking(move || apps::load_startup_icon(&command))
+        .await
+        .map_err(|error| format!("启动项图标任务异常结束: {error}"))
+}
+
 #[cfg(windows)]
 #[tauri::command]
 fn set_startup_enabled(id: String, enabled: bool, confirmed: bool) -> Result<(), String> {
@@ -480,6 +488,10 @@ mod startup_platform {
     pub fn startups() -> Vec<StartupEntry> {
         Vec::new()
     }
+
+    pub fn icon_command(_id: &str) -> Result<String, String> {
+        Err("启动项图标仅在 Windows 构建中可用".into())
+    }
 }
 
 #[cfg(windows)]
@@ -524,6 +536,21 @@ mod startup_platform {
                 }
             })
             .collect()
+    }
+
+    pub fn icon_command(id: &str) -> Result<String, String> {
+        let name = startup_value_name(id)?;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run = hkcu
+            .open_subkey_with_flags(RUN_KEY, KEY_QUERY_VALUE)
+            .map_err(|error| format!("无法读取当前用户启动项: {error}"))?;
+        let value = run
+            .get_raw_value(name)
+            .map_err(|_| "启动项不存在或已更改".to_string())?;
+        if !matches!(value.vtype, REG_SZ | REG_EXPAND_SZ) {
+            return Err("启动项注册表值类型不受支持".into());
+        }
+        String::from_reg_value(&value).map_err(|error| format!("无法解析启动项命令: {error}"))
     }
 
     pub fn set_enabled(id: &str, enabled: bool, confirmed: bool) -> Result<(), String> {
@@ -676,6 +703,7 @@ pub fn run() {
             get_app_icon,
             uninstall_app,
             list_startup_entries,
+            get_startup_icon,
             set_startup_enabled,
             reveal_in_explorer
         ])

@@ -6,6 +6,6 @@ mod types;
 pub(crate) use executor::execute;
 pub(crate) use store::CleanupPlanStore;
 pub(crate) use types::{
-    CleanupPlanPreview, CleanupScanResponse, CreateCleanupPlanRequest, ExecuteCleanupPlanRequest,
-    CLEANUP_RULE_VERSION,
+    CleanupPlanPreview, CleanupScanRequest, CleanupScanResponse, CreateCleanupPlanRequest,
+    ExecuteCleanupPlanRequest, CLEANUP_RULE_VERSION,
 };

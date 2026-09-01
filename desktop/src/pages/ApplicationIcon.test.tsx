@@ -3,20 +3,23 @@
 import '@testing-library/jest-dom/vitest';
 import { fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { loadAppIcon } from '../native';
-import { ApplicationIcon } from './ApplicationIcon';
+import { loadAppIcon, loadStartupIcon } from '../native';
+import { ApplicationIcon, StartupApplicationIcon } from './ApplicationIcon';
 
 vi.mock('../native', () => ({
   loadAppIcon: vi.fn(),
+  loadStartupIcon: vi.fn(),
 }));
 
 const mockedLoadAppIcon = vi.mocked(loadAppIcon);
+const mockedLoadStartupIcon = vi.mocked(loadStartupIcon);
 const iconDataUrl = 'data:image/png;base64,iVBORw0KGgo=';
 
 describe('ApplicationIcon', () => {
   beforeEach(() => {
     vi.stubGlobal('IntersectionObserver', undefined);
     mockedLoadAppIcon.mockReset();
+    mockedLoadStartupIcon.mockReset();
   });
 
   afterEach(() => {
@@ -59,5 +62,17 @@ describe('ApplicationIcon', () => {
     expect(container.querySelector('img')).toBeNull();
     expect(container.querySelector('.app-icon')).toHaveClass('fallback');
     expect(getByText('?')).toBeInTheDocument();
+  });
+
+  it('loads startup icons through the startup entry boundary', async () => {
+    mockedLoadStartupIcon.mockResolvedValue(iconDataUrl);
+    const { container } = render(
+      <StartupApplicationIcon startupId="hkcu:OneDrive" name="Microsoft OneDrive" />,
+    );
+
+    await waitFor(() => expect(container.querySelector('img')).not.toBeNull());
+
+    expect(mockedLoadStartupIcon).toHaveBeenCalledWith('hkcu:OneDrive');
+    expect(container.querySelector('img')).toHaveAttribute('src', iconDataUrl);
   });
 });

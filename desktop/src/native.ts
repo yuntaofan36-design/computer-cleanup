@@ -39,6 +39,7 @@ const MAX_APP_ICON_DATA_URL_LENGTH = 350_000;
 const MAX_CONCURRENT_APP_ICON_REQUESTS = 4;
 const MAX_CACHED_APP_ICON_REQUESTS = 256;
 const appIconRequests = new Map<string, Promise<string | null>>();
+const startupIconRequests = new Map<string, Promise<string | null>>();
 const appIconQueue: Array<() => void> = [];
 let activeAppIconRequests = 0;
 let previewStartupEntries = previewStartups.map((entry) => ({ ...entry }));
@@ -175,10 +176,10 @@ function pumpAppIconQueue(): void {
   }
 }
 
-function enqueueAppIconRequest(appId: string): Promise<string | null> {
+function enqueueIconRequest(command: 'get_app_icon' | 'get_startup_icon', id: string): Promise<string | null> {
   return new Promise((resolve, reject) => {
     appIconQueue.push(() => {
-      invoke<string | null>('get_app_icon', { id: appId })
+      invoke<string | null>(command, { id })
         .then(resolve, reject)
         .finally(() => {
           activeAppIconRequests -= 1;
@@ -224,6 +225,7 @@ export async function loadApps(): Promise<AppEntry[]> {
 
 export async function loadStartupEntries(): Promise<StartupEntry[]> {
   if (!isNativeRuntime()) return previewStartupEntries.map((entry) => ({ ...entry }));
+  startupIconRequests.clear();
   return invoke<StartupEntry[]>('list_startup_entries');
 }
 
@@ -251,7 +253,7 @@ export function loadAppIcon(appId: string): Promise<string | null> {
   }
 
   let request: Promise<string | null>;
-  request = enqueueAppIconRequest(appId)
+  request = enqueueIconRequest('get_app_icon', appId)
     .then(normalizeAppIconDataUrl)
     .then((dataUrl) => {
       if (dataUrl === null && appIconRequests.get(appId) === request) {
@@ -267,6 +269,37 @@ export function loadAppIcon(appId: string): Promise<string | null> {
   }
   void request.catch(() => {
     if (appIconRequests.get(appId) === request) appIconRequests.delete(appId);
+  });
+  return request;
+}
+
+export function loadStartupIcon(startupId: string): Promise<string | null> {
+  if (!isNativeRuntime() || !startupId) return Promise.resolve(null);
+
+  const cachedRequest = startupIconRequests.get(startupId);
+  if (cachedRequest) {
+    startupIconRequests.delete(startupId);
+    startupIconRequests.set(startupId, cachedRequest);
+    return cachedRequest;
+  }
+
+  let request: Promise<string | null>;
+  request = enqueueIconRequest('get_startup_icon', startupId)
+    .then(normalizeAppIconDataUrl)
+    .then((dataUrl) => {
+      if (dataUrl === null && startupIconRequests.get(startupId) === request) {
+        startupIconRequests.delete(startupId);
+      }
+      return dataUrl;
+    });
+  startupIconRequests.set(startupId, request);
+  while (startupIconRequests.size > MAX_CACHED_APP_ICON_REQUESTS) {
+    const oldestStartupId = startupIconRequests.keys().next().value;
+    if (typeof oldestStartupId !== 'string') break;
+    startupIconRequests.delete(oldestStartupId);
+  }
+  void request.catch(() => {
+    if (startupIconRequests.get(startupId) === request) startupIconRequests.delete(startupId);
   });
   return request;
 }

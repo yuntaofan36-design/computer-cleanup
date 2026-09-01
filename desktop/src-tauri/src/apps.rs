@@ -150,6 +150,14 @@ pub(crate) fn load_app_icon(request: AppIconRequest) -> Option<String> {
     platform::load_icon_png(&request).and_then(|png| png_data_url(&png))
 }
 
+pub(crate) fn load_startup_icon(command: &str) -> Option<String> {
+    let source = command_icon_source(command)?;
+    load_app_icon(AppIconRequest {
+        display_icon: Some(source),
+        uninstall_command: None,
+    })
+}
+
 pub(crate) fn launch_prepared_uninstaller(
     request: UninstallRequest,
 ) -> Result<LaunchResult, String> {
@@ -398,7 +406,7 @@ fn parse_display_icon(value: &str) -> Option<IconSource> {
     Some(IconSource { path, index })
 }
 
-fn uninstall_icon_source(command: &str) -> Option<IconSource> {
+fn command_icon_source(command: &str) -> Option<IconSource> {
     let parsed = parse_uninstall_command(command).ok()?;
     let path = parsed.executable.trim();
     if !looks_like_local_windows_absolute_path(path) {
@@ -652,7 +660,7 @@ mod platform {
         if let Some(source) = request
             .uninstall_command
             .as_deref()
-            .and_then(uninstall_icon_source)
+            .and_then(command_icon_source)
         {
             let duplicate = sources.iter().any(|existing| {
                 existing.index == source.index && existing.path.eq_ignore_ascii_case(&source.path)
@@ -1239,17 +1247,17 @@ mod tests {
 
     #[test]
     fn uninstall_icon_fallback_accepts_only_local_non_interpreter_exe() {
-        let source = uninstall_icon_source(r#""C:\Program Files\Example\uninstall.exe" /remove"#)
+        let source = command_icon_source(r#""C:\Program Files\Example\uninstall.exe" /remove"#)
             .expect("local vendor executable should be usable as a fallback");
         assert_eq!(source.path, r"C:\Program Files\Example\uninstall.exe");
         assert_eq!(source.index, 0);
 
-        assert!(uninstall_icon_source(r"MsiExec.exe /I{PRODUCT}").is_none());
+        assert!(command_icon_source(r"MsiExec.exe /I{PRODUCT}").is_none());
         assert!(
-            uninstall_icon_source(r"C:\Windows\System32\rundll32.exe setup.dll,Remove").is_none()
+            command_icon_source(r"C:\Windows\System32\rundll32.exe setup.dll,Remove").is_none()
         );
-        assert!(uninstall_icon_source(r"C:\Windows\System32\cmd.exe /c remove").is_none());
-        assert!(uninstall_icon_source(r"\\server\share\uninstall.exe /remove").is_none());
+        assert!(command_icon_source(r"C:\Windows\System32\cmd.exe /c remove").is_none());
+        assert!(command_icon_source(r"\\server\share\uninstall.exe /remove").is_none());
     }
 
     #[test]
@@ -1309,5 +1317,32 @@ mod tests {
         assert!(png.starts_with(PNG_SIGNATURE));
         assert!(png.len() > PNG_SIGNATURE.len() + 32);
         assert!(png.len() < MAX_ICON_DATA_URL_BYTES);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extracts_real_executable_icon_from_a_startup_command() {
+        let system_root =
+            std::env::var_os("SystemRoot").expect("Windows must expose the SystemRoot directory");
+        let executable = std::path::PathBuf::from(system_root)
+            .join("System32")
+            .join("notepad.exe");
+        assert!(
+            executable.is_file(),
+            "Windows Notepad executable should exist"
+        );
+
+        let command = format!(r#""{}" /background"#, executable.display());
+        let data_url = load_startup_icon(&command)
+            .expect("a startup command should resolve to its executable's real icon");
+
+        assert!(data_url.starts_with(PNG_DATA_URL_PREFIX));
+        let png = decode_base64_for_test(
+            data_url
+                .strip_prefix(PNG_DATA_URL_PREFIX)
+                .expect("startup icon should be a PNG data URL"),
+        )
+        .expect("startup icon payload should be valid base64");
+        assert!(png.starts_with(PNG_SIGNATURE));
     }
 }

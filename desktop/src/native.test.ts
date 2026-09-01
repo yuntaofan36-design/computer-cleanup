@@ -24,6 +24,7 @@ import {
   loadApps,
   loadPartitionDisks,
   loadStartupEntries,
+  loadStartupIcon,
   setStartupEntryEnabled,
 } from './native';
 
@@ -236,6 +237,18 @@ describe('startup entry wrappers', () => {
       enabled: false,
       confirmed: true,
     });
+  });
+
+  it('loads a startup icon by opaque entry id', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      configurable: true,
+      value: {},
+    });
+    invokeMock.mockResolvedValueOnce(iconDataUrl);
+
+    await expect(loadStartupIcon('hkcu:OneDrive')).resolves.toBe(iconDataUrl);
+
+    expect(invokeMock).toHaveBeenCalledWith('get_startup_icon', { id: 'hkcu:OneDrive' });
   });
 
   it('keeps preview changes in an isolated in-memory copy', async () => {

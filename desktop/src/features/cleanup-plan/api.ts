@@ -102,9 +102,11 @@ function normalizePlan(plan: NativeCleanupPlan): CleanupPlan {
   };
 }
 
-export async function scanCleanup(): Promise<CleanupScan> {
+export async function scanCleanup(taskId: string): Promise<CleanupScan> {
   if (!isTauriRuntime()) return previewScanCleanup();
-  return normalizeScan(await invoke<NativeCleanupScan>('scan_cleanup_v2'));
+  return normalizeScan(await invoke<NativeCleanupScan>('scan_cleanup_v2', {
+    request: { taskId },
+  }));
 }
 
 export async function createCleanupPlan(

@@ -68,6 +68,47 @@ const quarantinedTempItem: CleanupItem = {
   deleteMode: 'quarantine',
 };
 
+describe('cleanup scan controls', () => {
+  it('offers a real stop action and locks it while cancellation is pending', () => {
+    const onCancelScan = vi.fn();
+    const { rerender } = render(
+      <CleanupCenter
+        items={[wechatItem]}
+        selected={new Set()}
+        scanning
+        scanCancelling={false}
+        progress={0}
+        scanPath="正在扫描缓存目录…"
+        onScan={vi.fn()}
+        onCancelScan={onCancelScan}
+        onToggle={vi.fn()}
+        onOpenBasket={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '终止扫描' }));
+    expect(onCancelScan).toHaveBeenCalledOnce();
+
+    rerender(
+      <CleanupCenter
+        items={[wechatItem]}
+        selected={new Set()}
+        scanning
+        scanCancelling
+        progress={0}
+        scanPath="正在安全终止扫描…"
+        onScan={vi.fn()}
+        onCancelScan={onCancelScan}
+        onToggle={vi.fn()}
+        onOpenBasket={vi.fn()}
+      />,
+    );
+
+    const pendingButton = screen.getByRole('button', { name: '正在终止…' });
+    expect((pendingButton as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
 describe('WeChat cleanup scope', () => {
   it('shows optional user data unselected while keeping safe WeChat cache selected', () => {
     const onToggle = vi.fn();
@@ -76,9 +117,11 @@ describe('WeChat cleanup scope', () => {
         items={[wechatItem, chatItem]}
         selected={new Set([wechatItem.id])}
         scanning={false}
+        scanCancelling={false}
         progress={0}
         scanPath=""
         onScan={vi.fn()}
+        onCancelScan={vi.fn()}
         onToggle={onToggle}
         onOpenBasket={vi.fn()}
       />,
@@ -110,9 +153,11 @@ describe('browser cleanup scope', () => {
         items={[runningBrowserItem]}
         selected={new Set()}
         scanning={false}
+        scanCancelling={false}
         progress={0}
         scanPath=""
         onScan={vi.fn()}
+        onCancelScan={vi.fn()}
         onToggle={onToggle}
         onOpenBasket={vi.fn()}
       />,
@@ -150,9 +195,11 @@ describe('developer cache cleanup scope', () => {
         items={[developerItem]}
         selected={new Set()}
         scanning={false}
+        scanCancelling={false}
         progress={0}
         scanPath=""
         onScan={vi.fn()}
+        onCancelScan={vi.fn()}
         onToggle={vi.fn()}
         onOpenBasket={vi.fn()}
       />,
@@ -176,9 +223,11 @@ describe('developer cache cleanup scope', () => {
         items={[developerItem, wechatItem, runningBrowserItem, quarantinedTempItem]}
         selected={new Set()}
         scanning={false}
+        scanCancelling={false}
         progress={0}
         scanPath=""
         onScan={vi.fn()}
+        onCancelScan={vi.fn()}
         onToggle={vi.fn()}
         onOpenBasket={vi.fn()}
       />,
@@ -199,9 +248,11 @@ describe('cleanup plan controls', () => {
         items={[wechatItem, secondSafeItem, chatItem]}
         selected={new Set()}
         scanning={false}
+        scanCancelling={false}
         progress={0}
         scanPath=""
         onScan={vi.fn()}
+        onCancelScan={vi.fn()}
         onToggle={onToggle}
         onOpenBasket={vi.fn()}
       />,
@@ -221,9 +272,11 @@ describe('cleanup plan controls', () => {
         items={[wechatItem]}
         selected={new Set([wechatItem.id])}
         scanning={false}
+        scanCancelling={false}
         progress={0}
         scanPath=""
         onScan={vi.fn()}
+        onCancelScan={vi.fn()}
         onToggle={vi.fn()}
         onOpenBasket={vi.fn()}
         onClean={onClean}
@@ -241,9 +294,11 @@ describe('cleanup plan controls', () => {
         items={[quarantinedTempItem]}
         selected={new Set([quarantinedTempItem.id])}
         scanning={false}
+        scanCancelling={false}
         progress={0}
         scanPath=""
         onScan={vi.fn()}
+        onCancelScan={vi.fn()}
         onToggle={vi.fn()}
         onOpenBasket={vi.fn()}
       />,

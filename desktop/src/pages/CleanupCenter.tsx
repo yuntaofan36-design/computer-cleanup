@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  AppWindow, Check, ChevronDown, CircleSlash2, FileStack, Globe2, HardDrive,
+  AppWindow, Check, ChevronDown, CircleSlash2, CircleStop, FileStack, Globe2, HardDrive,
   Info, MessageCircle, MessagesSquare, RefreshCw, ScanSearch, ShieldCheck, Sparkles,
   Terminal, Trash2, TriangleAlert,
 } from 'lucide-react';
@@ -14,10 +14,12 @@ interface CleanupCenterProps {
   items: CleanupItem[];
   selected: Set<string>;
   scanning: boolean;
+  scanCancelling: boolean;
   progress: number;
   scanPath: string;
   disk?: DiskInfo;
   onScan: () => void;
+  onCancelScan: () => void;
   onToggle: (id: string) => void;
   onOpenBasket: () => void;
   onClean?: () => void;
@@ -99,8 +101,8 @@ function CleanupTile({ item, active, checked, onInspect, onToggle }: {
 }
 
 export default function CleanupCenter({
-  items, selected, scanning, progress, scanPath, disk,
-  onScan, onToggle, onOpenBasket, onClean,
+  items, selected, scanning, scanCancelling, progress, scanPath, disk,
+  onScan, onCancelScan, onToggle, onOpenBasket, onClean,
 }: CleanupCenterProps) {
   const [scope, setScope] = useState<ScopeFilter>('all');
   const [activeId, setActiveId] = useState('');
@@ -174,7 +176,7 @@ export default function CleanupCenter({
 
     {scanning ? <div className="scanner-panel">
       <div className="scanner-visual indeterminate" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuetext={progress === 100 ? '扫描完成' : '正在扫描，暂不提供百分比'}><span><ScanSearch /></span><i>扫描中</i></div>
-      <div><p className="eyebrow">扫描阶段只读</p><h2>正在建立文件快照</h2><p>{scanPath || '正在枚举严格白名单目录…'}</p><div className="progress-track indeterminate"><span /></div><small><ShieldCheck />不会跟随符号链接，不会跨卷，也不会修改任何内容。</small></div>
+      <div><p className="eyebrow">扫描阶段只读</p><h2>正在建立文件快照</h2><p>{scanPath || '正在枚举严格白名单目录…'}</p><div className="progress-track indeterminate"><span /></div><small><ShieldCheck />不会跟随符号链接，不会跨卷，也不会修改任何内容。</small><button type="button" className="button secondary scan-cancel-button" disabled={scanCancelling} onClick={onCancelScan}><CircleStop />{scanCancelling ? '正在终止…' : '终止扫描'}</button></div>
     </div> : !visibleItems.length ? <EmptyState
       icon={scope === 'wechat' ? <MessageCircle /> : <ScanSearch />}
       title={items.length ? '此范围没有可清理内容' : '还没有扫描结果'}
