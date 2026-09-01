@@ -1,4 +1,4 @@
-export type CleanupScope = 'system' | 'browser' | 'apps' | 'wechat';
+export type CleanupScope = 'system' | 'browser' | 'apps' | 'wechat' | 'devtools' | 'social';
 export type RiskLevel = 'low' | 'medium' | 'high';
 export type Confidence = 'high' | 'medium' | 'low';
 export type Impact = 'none' | 'rebuild' | 'signout' | 'user_data';

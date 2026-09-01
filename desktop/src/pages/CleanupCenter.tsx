@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   AppWindow, Check, ChevronDown, CircleSlash2, FileStack, Globe2, HardDrive,
-  Info, MessageCircle, RefreshCw, ScanSearch, ShieldCheck, Sparkles, Trash2, TriangleAlert,
+  Info, MessageCircle, MessagesSquare, RefreshCw, ScanSearch, ShieldCheck, Sparkles,
+  Terminal, Trash2, TriangleAlert,
 } from 'lucide-react';
 import { DimensionTags, EmptyState, SafetyNotice } from '../components';
 import { formatBytes } from '../format';
@@ -26,7 +27,9 @@ const scopes: Array<{ id: CleanupScope; label: string; shortLabel: string; icon:
   { id: 'system', label: '系统盘清理', shortLabel: '系统', icon: Sparkles },
   { id: 'apps', label: '软件缓存', shortLabel: '软件', icon: AppWindow },
   { id: 'browser', label: '浏览器数据', shortLabel: '浏览器', icon: Globe2 },
+  { id: 'devtools', label: '开发者缓存', shortLabel: '开发', icon: Terminal },
   { id: 'wechat', label: '微信专清', shortLabel: '微信', icon: MessageCircle },
+  { id: 'social', label: 'QQ 专清', shortLabel: 'QQ', icon: MessagesSquare },
 ];
 
 const sumBytes = (items: CleanupItem[]) => items.reduce((sum, item) => sum + item.sizeBytes, 0);
@@ -52,6 +55,8 @@ function itemIcon(item: CleanupItem) {
   if (item.scope === 'browser') return <Globe2 />;
   if (item.scope === 'apps') return <AppWindow />;
   if (item.scope === 'wechat') return <MessageCircle />;
+  if (item.scope === 'social') return <MessagesSquare />;
+  if (item.scope === 'devtools') return <Terminal />;
   return item.category.includes('系统') ? <Sparkles /> : <FileStack />;
 }
 
@@ -177,7 +182,9 @@ export default function CleanupCenter({
       action={<button className="button primary" onClick={onScan}><ScanSearch />开始扫描</button>}
     /> : <>
       {scope === 'browser' && <SafetyNotice tone="info"><strong>登录状态与身份数据受到额外保护</strong><p>Cookie、会话、密码、书签和自动填充不会进入一键清理；正在运行的浏览器只展示占用，关闭后重新扫描才能选择。</p></SafetyNotice>}
+      {scope === 'devtools' && <SafetyNotice tone="info"><strong>清理后首次构建会重新下载依赖</strong><p>只包含各工具的可再生缓存目录，不含已安装的可执行文件、锁定文件与本地索引。pnpm 全局 store 使用硬链接共享给各项目，不在此处清理，需用 <code>pnpm store prune</code>。</p></SafetyNotice>}
       {scope === 'wechat' && <SafetyNotice tone="warning"><strong>聊天与媒体数据由你决定是否清理</strong><p>聊天记录、图片、视频、文件、语音、收藏和表情默认不勾选；主动选择后仍需最终确认，删除后无法恢复。</p></SafetyNotice>}
+      {scope === 'social' && <SafetyNotice tone="info"><strong>仅清理 QQ 可再生缓存</strong><p>只包含网络、代码、图形缓存与崩溃报告。聊天记录与接收的文件位于「我的文档」下，不在此处理。QQ 正在运行时会跳过，关闭后重新扫描。</p></SafetyNotice>}
 
       {recommended.length > 0 && <div className="cleanup-section recommended-section">
         <header className="cleanup-section-head">

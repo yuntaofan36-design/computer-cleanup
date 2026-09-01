@@ -68,7 +68,7 @@ function ConfirmationDialog({
         </h2>
         <p>
           {isUninstall
-            ? '系统将打开此应用注册的官方卸载程序，由它完成卸载。清盘不会直接删除安装目录，也不会碰触用户文档。'
+            ? '系统将打开此应用注册的官方卸载程序，由它完成卸载。Lumina Clean 不会直接删除安装目录，也不会碰触用户文档。'
             : `仅处理扫描结果中已确认可重建的 ${formatBytes(action.app.cacheBytes)} 缓存；不会删除应用配置、登录信息或用户文件。`}
         </p>
         <div className="dialog-actions">

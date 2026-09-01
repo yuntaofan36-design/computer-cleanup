@@ -1,18 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Bell,
-  Boxes,
-  ChartNoAxesCombined,
   ChevronDown,
-  Files,
+  Grid2X2,
   HardDrive,
   LayoutDashboard,
+  Monitor,
+  Moon,
   Package,
   RotateCcw,
   Settings,
   ShieldCheck,
   ShoppingBasket,
   Sparkles,
+  Sun,
   X,
 } from 'lucide-react';
 import { BasketDrawer, CleanupExecutionSummary, Dialog } from './components';
@@ -44,12 +44,14 @@ import {
   loadDisks,
   loadOperationRecords,
   loadPartitionDisks,
+  loadStartupEntries,
   openWindowsDiskManagement,
   requestUninstall,
   revealInExplorer,
   scanDuplicateFiles,
   scanLargeFiles,
   scanStorageUsage,
+  setStartupEntryEnabled,
 } from './native';
 import AppManagement from './pages/AppManagement';
 import CleanupCenter from './pages/CleanupCenter';
@@ -59,6 +61,8 @@ import Overview from './pages/Overview';
 import RecoveryCenter from './pages/RecoveryCenter';
 import SettingsPage from './pages/SettingsPage';
 import StorageAnalysis from './pages/StorageAnalysis';
+import StartupManager from './pages/StartupManager';
+import Toolbox from './pages/Toolbox';
 import { useAppStore } from './store';
 import { formatBytes } from './format';
 import type {
@@ -73,21 +77,21 @@ import type {
   Page,
   PartitionDisk,
   StorageCategory,
+  StartupEntry,
 } from './types';
 
-const primaryNav: Array<{ id: Page; label: string; description: string; icon: typeof LayoutDashboard }> = [
-  { id: 'overview', label: '空间概览', description: '磁盘与建议', icon: LayoutDashboard },
-  { id: 'cleanup', label: '清理中心', description: '有证据地清理', icon: Sparkles },
-  { id: 'files', label: '文件发现', description: '大文件与重复项', icon: Files },
-  { id: 'analysis', label: '磁盘地图', description: '空间可视化', icon: ChartNoAxesCombined },
-  { id: 'partition', label: '磁盘分区', description: '布局与系统管理', icon: HardDrive },
+const primaryNav: Array<{ id: Page; label: string; icon: typeof LayoutDashboard }> = [
+  { id: 'overview', label: '概览', icon: LayoutDashboard },
+  { id: 'cleanup', label: '清理', icon: Sparkles },
+  { id: 'tools', label: '工具箱', icon: Grid2X2 },
 ];
 
 const secondaryNav: Array<{ id: Page; label: string; icon: typeof Package }> = [
-  { id: 'apps', label: '应用管理', icon: Package },
-  { id: 'recovery', label: '恢复与记录', icon: RotateCcw },
-  { id: 'settings', label: '安全设置', icon: Settings },
+  { id: 'recovery', label: '恢复', icon: RotateCcw },
+  { id: 'settings', label: '设置', icon: Settings },
 ];
+
+const toolPages = new Set<Page>(['tools', 'files', 'analysis', 'startup', 'partition', 'apps']);
 
 const builtInExclusionRules = [
   '*.pst / *.ost 邮件存档',
@@ -119,6 +123,10 @@ function pathIsInside(path: string, excludedPath: string): boolean {
   return candidate === excluded || candidate.startsWith(`${excluded}\\`);
 }
 
+function pathsOverlap(left: string, right: string): boolean {
+  return pathIsInside(left, right) || pathIsInside(right, left);
+}
+
 function exclusionsWithinRoot(exclusions: string[], root: string): string[] {
   return exclusions.filter((path) => pathIsInside(path, root) && !pathIsInside(root, path));
 }
@@ -140,13 +148,14 @@ function initialCleanupProgress(items: CleanupItem[]): CleanupProgress {
 
 export default function App() {
   const {
-    page, setPage, theme, disks, setDisks, activeDiskId, setActiveDiskId,
+    page, setPage, theme, setTheme, disks, setDisks, activeDiskId, setActiveDiskId,
     cleanupItems, setCleanupItems, selected, toggleItem, setSafeDefaults, clearSelection, removeSelected,
     scanning, setScanning, progress, setProgress, scanPath, setScanPath, lastScanAt, setLastScanAt,
     basketOpen, setBasketOpen,
   } = useAppStore();
   const nativeRuntime = isNativeRuntime();
   const [installedApps, setInstalledApps] = useState<AppEntry[]>([]);
+  const [startupEntries, setStartupEntries] = useState<StartupEntry[]>([]);
   const [operationRecords, setOperationRecords] = useState<OperationRecord[]>(nativeRuntime ? [] : previewRecords);
   const [discoveryFiles, setDiscoveryFiles] = useState<LargeFileEntry[]>(nativeRuntime ? [] : previewLargeFiles);
   const [discoveryDuplicates, setDiscoveryDuplicates] = useState<DuplicateGroup[]>(nativeRuntime ? [] : previewDuplicateGroups);
@@ -160,10 +169,13 @@ export default function App() {
   const [analysisScanStatus, setAnalysisScanStatus] = useState<TaskStatus>(nativeRuntime ? 'idle' : 'complete');
   const [fileScannedAt, setFileScannedAt] = useState(nativeRuntime ? '' : '演示数据');
   const [analysisScannedAt, setAnalysisScannedAt] = useState(nativeRuntime ? '' : '演示数据');
+  const [fileDiscoveryTab, setFileDiscoveryTab] = useState<FileDiscoveryTab>('large-files');
   const [fileTaskId, setFileTaskId] = useState<string | null>(null);
   const [analysisTaskId, setAnalysisTaskId] = useState<string | null>(null);
   const [userExclusions, setUserExclusions] = useState<string[]>(readUserExclusions);
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
+  const [busyStartupId, setBusyStartupId] = useState<string | null>(null);
+  const [startupError, setStartupError] = useState('');
   const [latestCleanupScanId, setLatestCleanupScanId] = useState<string | null>(null);
   const [planningCleanup, setPlanningCleanup] = useState(false);
   const [executeOpen, setExecuteOpen] = useState(false);
@@ -186,20 +198,35 @@ export default function App() {
   const showingExecutionSummary = executing || Boolean(cleanupResult) || Boolean(cleanupError);
   const anyReadScan = fileScanStatus === 'scanning' || analysisScanStatus === 'scanning';
 
+  function openFileDiscovery(tab: FileDiscoveryTab) {
+    setFileDiscoveryTab(tab);
+    setPage('files');
+  }
+
+  function cycleTheme() {
+    setTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system');
+  }
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem('qingpanTheme', theme);
+    localStorage.setItem('luminaTheme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, [page]);
 
   useEffect(() => {
     loadDisks().then(setDisks).catch((error) => setToast(error instanceof Error ? error.message : '无法读取磁盘'));
     loadApps().then(setInstalledApps).catch((error) => setToast(error instanceof Error ? error.message : '无法读取应用清单'));
+    loadStartupEntries().then(setStartupEntries).catch((error) => setStartupError(error instanceof Error ? error.message : '无法读取启动项'));
     loadOperationRecords(50).then(setOperationRecords).catch(() => setOperationRecords(nativeRuntime ? [] : previewRecords));
     if (!nativeRuntime) {
       void scanCleanup().then((scan) => {
+        const visibleItems = scan.items.filter((item) => !userExclusions.some((path) => pathsOverlap(item.path, path)));
         setLatestCleanupScanId(scan.scanId);
-        setCleanupItems(scan.items);
-        setSafeDefaults(scan.items);
+        setCleanupItems(visibleItems);
+        setSafeDefaults(visibleItems);
       });
       setLastScanAt('演示数据 · 尚未执行真实扫描');
     }
@@ -249,11 +276,12 @@ export default function App() {
     clearSelection();
     try {
       const scan = await scanCleanup();
+      const visibleItems = scan.items.filter((item) => !userExclusions.some((path) => pathsOverlap(item.path, path)));
       setLatestCleanupScanId(scan.scanId);
-      setCleanupItems(scan.items);
-      setSafeDefaults(scan.items);
+      setCleanupItems(visibleItems);
+      setSafeDefaults(visibleItems);
       setProgress(100);
-      setScanPath(`已建立 ${scan.items.length} 项安全快照`);
+      setScanPath(`已建立 ${visibleItems.length} 项安全快照`);
       setLastScanAt(scanTime());
     } catch (error) {
       setToast(error instanceof Error ? error.message : '扫描失败，请重试');
@@ -327,8 +355,9 @@ export default function App() {
       if (nativeRuntime) {
         try {
           const refreshedScan = await scanCleanup();
+          const visibleItems = refreshedScan.items.filter((item) => !userExclusions.some((path) => pathsOverlap(item.path, path)));
           setLatestCleanupScanId(refreshedScan.scanId);
-          setCleanupItems(refreshedScan.items);
+          setCleanupItems(visibleItems);
         } catch {
           setCleanupFollowUp('清理已完成，但待清理内容刷新失败，可重新扫描后查看');
         }
@@ -459,6 +488,34 @@ export default function App() {
     }
   }
 
+  async function refreshStartupEntries() {
+    setStartupError('');
+    try {
+      setStartupEntries(await loadStartupEntries());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '无法读取启动项';
+      setStartupError(message);
+      throw error;
+    }
+  }
+
+  async function toggleStartupEntry(id: string, enabled: boolean) {
+    if (busyStartupId) return;
+    setBusyStartupId(id);
+    setStartupError('');
+    try {
+      await setStartupEntryEnabled(id, enabled);
+      setStartupEntries((entries) => entries.map((entry) => entry.id === id ? { ...entry, enabled } : entry));
+      setToast(enabled ? '启动项已启用' : '启动项已禁用');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '无法更新启动项';
+      setStartupError(message);
+      throw error;
+    } finally {
+      setBusyStartupId(null);
+    }
+  }
+
   async function reveal(path: string) {
     try {
       await revealInExplorer(path);
@@ -476,6 +533,7 @@ export default function App() {
     const next = [...userExclusions, path];
     setUserExclusions(next);
     localStorage.setItem(exclusionsKey, JSON.stringify(next));
+    setCleanupItems(cleanupItems.filter((item) => !pathsOverlap(item.path, path)));
     setDiscoveryFiles((files) => files.filter((file) => !pathIsInside(file.path, path)));
     setDiscoveryDuplicates((groups) => groups
       .map((group) => {
@@ -486,36 +544,65 @@ export default function App() {
         return { ...group, members, reclaimableBytes: group.sizeBytes * Math.max(0, members.length - 1) };
       })
       .filter((group) => group.members.length > 1));
+    setAnalysisDirectories((directories) => directories.filter((directory) => !pathIsInside(directory.path, path)));
     setToast('已加入本机排除规则，后续扫描会在入口处跳过');
   }
 
+  function removeExclusion(path: string) {
+    const next = userExclusions.filter((entry) => entry !== path);
+    setUserExclusions(next);
+    localStorage.setItem(exclusionsKey, JSON.stringify(next));
+    setToast('已移除排除路径；重新扫描后会更新结果');
+  }
+
+  const currentPageLabel: Record<Page, string> = {
+    overview: '空间概览',
+    cleanup: '清理中心',
+    tools: '工具箱',
+    files: '文件发现',
+    analysis: '磁盘分析',
+    startup: '启动项管理',
+    partition: '磁盘分区',
+    apps: '应用管理',
+    recovery: '恢复中心',
+    settings: '设置',
+  };
+  const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor;
+  const themeLabel = theme === 'dark' ? '深色' : theme === 'light' ? '浅色' : '跟随系统';
+
   return <div className="app-shell">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><ShieldCheck /></span><div><strong>清盘</strong><small>QINGPAN · SAFE SPACE</small></div></div>
-      <div className="nav-label">空间工作台</div>
-      <nav className="primary-nav">{primaryNav.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)}><span><item.icon /></span><div><strong>{item.label}</strong><small>{item.description}</small></div></button>)}</nav>
-      <div className="nav-label secondary-label">管理</div>
-      <nav className="secondary-nav">{secondaryNav.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)}><item.icon /><span>{item.label}</span></button>)}</nav>
-      <div className="local-card"><span><ShieldCheck /></span><div><strong>文件信息仅在本机</strong><small>未上传路径与内容哈希</small></div></div>
-      <div className="sidebar-foot"><span className="avatar">QP</span><div><strong>专业版</strong><small>安全规则 v2026.07</small></div><Boxes /></div>
+      <button className="brand" type="button" onClick={() => setPage('overview')} aria-label="返回 Lumina Clean 首页">
+        <span className="brand-mark"><Sparkles /></span>
+        <span className="brand-name"><strong>Lumina</strong><small>CLEAN</small></span>
+      </button>
+      <nav className="primary-nav" aria-label="主要导航">{primaryNav.map((item) => {
+        const active = item.id === 'tools' ? toolPages.has(page) : page === item.id;
+        return <button key={item.id} className={active ? 'active' : ''} onClick={() => setPage(item.id)} title={item.label}><span><item.icon /></span><strong>{item.label}</strong></button>;
+      })}</nav>
+      <nav className="secondary-nav" aria-label="辅助导航">{secondaryNav.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)} title={item.label}><item.icon /><strong>{item.label}</strong></button>)}</nav>
+      <div className="sidebar-foot"><ShieldCheck /><span><strong>本地模式</strong><small>规则 v2026.07</small></span></div>
     </aside>
 
     <div className="app-stage">
       <header className="topbar">
-        <button className="drive-select" aria-label="选择磁盘"><span><HardDrive /></span><div><small>当前分析磁盘</small><strong>{activeDisk.name} ({activeDisk.mount || '--'})</strong></div><select value={activeDiskId} disabled={anyReadScan || scanning} onChange={(event) => setActiveDiskId(event.target.value)}>{disks.map((disk) => <option key={disk.id} value={disk.id}>{disk.name} ({disk.mount})</option>)}</select><ChevronDown /></button>
-        <div className="topbar-status"><span className="live-dot" />保护引擎运行中</div>
-        <button className="icon-button top-icon" aria-label="通知"><Bell /></button>
-        <button className="basket-button" onClick={() => setBasketOpen(true)}><ShoppingBasket /><span><small>清理篮</small><strong>{selected.size ? `${selected.size} 项 · ${formatBytes(selectedBytes)}` : '尚未选择'}</strong></span>{selected.size > 0 && <b>{selected.size}</b>}</button>
+        <div className="page-identity"><small>Lumina Clean</small><strong>{currentPageLabel[page]}</strong></div>
+        <label className="drive-select" aria-label="选择磁盘"><span><HardDrive /></span><div><small>当前磁盘</small><strong>{activeDisk.name} ({activeDisk.mount || '--'})</strong></div><select value={activeDiskId} disabled={anyReadScan || scanning} onChange={(event) => setActiveDiskId(event.target.value)}>{disks.map((disk) => <option key={disk.id} value={disk.id}>{disk.name} ({disk.mount})</option>)}</select><ChevronDown /></label>
+        <div className="topbar-status"><span className="live-dot" />仅在本机运行</div>
+        <button className="icon-button top-icon" type="button" onClick={cycleTheme} aria-label={`当前${themeLabel}，切换主题`} title={`主题：${themeLabel}`}><ThemeIcon /></button>
+        <button className="basket-button" type="button" onClick={() => setBasketOpen(true)} aria-label={`清理篮，${selected.size} 项`}><ShoppingBasket /><span><small>清理篮</small><strong>{selected.size ? `${selected.size} 项 · ${formatBytes(selectedBytes)}` : '未选择'}</strong></span>{selected.size > 0 && <b>{selected.size}</b>}</button>
       </header>
       <main className="content">
         {page === 'overview' && <Overview disk={activeDisk} items={cleanupItems} records={operationRecords} lastScanAt={lastScanAt} scanning={scanning} onScan={runScan} onNavigate={setPage} />}
         {page === 'cleanup' && <CleanupCenter items={cleanupItems} selected={selected} scanning={scanning} progress={progress} scanPath={scanPath} disk={activeDisk} onScan={runScan} onToggle={toggleItem} onOpenBasket={() => setBasketOpen(true)} onClean={() => void openExecutionReview()} />}
-        {page === 'files' && <FileDiscovery largeFiles={discoveryFiles} duplicateGroups={discoveryDuplicates} scanStatus={fileScanStatus} scannedAt={fileScannedAt || undefined} onScan={(tab) => void runFileScan(tab)} onCancel={() => void cancelFileScan()} onDeleteLargeFiles={runLargeFileDelete} onRevealInExplorer={(path) => void reveal(path)} onAddExclusion={addExclusion} />}
+        {page === 'tools' && <Toolbox largeFileCount={discoveryFiles.length} duplicateGroupCount={discoveryDuplicates.length} appCount={installedApps.length} startupCount={startupEntries.length} analyzedDirectoryCount={analysisDirectories.length} onOpenFileDiscovery={openFileDiscovery} onNavigate={setPage} />}
+        {page === 'files' && <FileDiscovery initialTab={fileDiscoveryTab} largeFiles={discoveryFiles} duplicateGroups={discoveryDuplicates} scanStatus={fileScanStatus} scannedAt={fileScannedAt || undefined} onScan={(tab) => void runFileScan(tab)} onCancel={() => void cancelFileScan()} onDeleteLargeFiles={runLargeFileDelete} onRevealInExplorer={(path) => void reveal(path)} onAddExclusion={addExclusion} />}
         {page === 'analysis' && <StorageAnalysis disk={activeDisk} directories={analysisDirectories} categories={analysisCategories} initialPath={activeDisk.mount} scanStatus={analysisScanStatus} scannedAt={analysisScannedAt || undefined} onScan={() => void runStorageScan()} onCancel={() => void cancelStorageScan()} onAnalyzeDirectory={(directory) => void runStorageScan(directory.path, true)} />}
+        {page === 'startup' && <StartupManager entries={startupEntries} busyId={busyStartupId} error={startupError} onToggle={toggleStartupEntry} onRefresh={refreshStartupEntries} />}
         {page === 'partition' && <DiskPartition disks={partitionDisks} loading={partitionLoading} error={partitionError} onRefresh={() => void refreshPartitionLayout()} onOpenDiskManagement={() => void openPartitionManager()} />}
         {page === 'apps' && <AppManagement apps={installedApps} busyAppId={busyAppId} onRequestUninstall={(app) => void uninstall(app.id)} onClearCache={(app) => { setPage('cleanup'); setToast(`请在应用缓存中复核 ${app.name} 的可重建内容`); }} />}
         {page === 'recovery' && <RecoveryCenter auditRecords={operationRecords} />}
-        {page === 'settings' && <SettingsPage protectedDirectories={protectedPaths.map((item) => item.path)} exclusionRules={[...builtInExclusionRules, ...userExclusions]} autoCleanupEnabled={false} theme={theme} setTheme={useAppStore.getState().setTheme} />}
+        {page === 'settings' && <SettingsPage protectedDirectories={protectedPaths.map((item) => item.path)} builtInExclusionRules={builtInExclusionRules} userExclusions={userExclusions} onAddExclusion={addExclusion} onRemoveExclusion={removeExclusion} theme={theme} setTheme={setTheme} />}
       </main>
     </div>
 
@@ -533,7 +620,7 @@ export default function App() {
       onConfirm={runCleanup}
     >
       {showingExecutionSummary && cleanupProgress
-        ? <CleanupExecutionSummary items={executionPlan} progress={cleanupProgress} result={cleanupResult} error={cleanupError} onDone={closeExecution} />
+        ? <CleanupExecutionSummary items={executionPlan} progress={cleanupProgress} result={cleanupResult} error={cleanupError} onDone={() => { closeExecution(); setPage('overview'); }} />
         : <><p>后端计划包含 <strong>{cleanupPlan?.totalItems ?? 0} 个规则类别</strong>，预计释放 <strong>{formatBytes(plannedBytes)}</strong>。执行时会按该计划保存的扫描快照逐文件复检。</p><div className="confirm-proof"><span><ShieldCheck /></span><div><strong>默认失败策略：跳过并保留</strong><small>文件已修改、路径变化、被占用或身份不符时不会强制删除。</small></div></div>{plannedIrreversibleCount > 0 && <><div className="confirm-warning"><ShieldCheck /><span><strong>{plannedIrreversibleCount} 项不可恢复内容</strong><small>包含微信聊天或媒体数据，执行后无法找回。</small></span></div><label className="irreversible-confirmation"><input type="checkbox" checked={irreversibleConfirmed} onChange={(event) => setIrreversibleConfirmed(event.target.checked)} /><span>我确认永久删除所选微信用户数据</span></label></>}</>}
     </Dialog>}
     {toast && <div className="toast" role="status"><ShieldCheck /><span>{toast}</span><button className="icon-button" onClick={() => setToast('')} aria-label="关闭提示"><X /></button></div>}

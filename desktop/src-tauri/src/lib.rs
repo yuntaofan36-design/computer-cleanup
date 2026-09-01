@@ -432,6 +432,13 @@ fn list_startup_entries() -> Vec<StartupEntry> {
     startup_platform::startups()
 }
 
+#[cfg(windows)]
+#[tauri::command]
+fn set_startup_enabled(id: String, enabled: bool, confirmed: bool) -> Result<(), String> {
+    startup_platform::set_enabled(&id, enabled, confirmed)
+}
+
+#[cfg(not(windows))]
 #[tauri::command]
 fn set_startup_enabled(_id: String, _enabled: bool, _confirmed: bool) -> Result<(), String> {
     Err("启动项修改仅在 Windows 构建中可用".into())
@@ -478,27 +485,169 @@ mod startup_platform {
 #[cfg(windows)]
 mod startup_platform {
     use super::*;
-    use winreg::{enums::*, RegKey};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use winreg::{enums::*, types::FromRegValue, RegKey, RegValue};
+
+    const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    const STARTUP_APPROVED_RUN_KEY: &str =
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    const STARTUP_ID_PREFIX: &str = "hkcu:";
+    const MAX_REGISTRY_VALUE_NAME_UTF16_LEN: usize = 16_383;
+    const STARTUP_APPROVED_ENABLED: u32 = 2;
+    const STARTUP_APPROVED_DISABLED: u32 = 3;
+    const WINDOWS_EPOCH_OFFSET_SECONDS: u64 = 11_644_473_600;
 
     pub fn startups() -> Vec<StartupEntry> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let Ok(root) = hkcu.open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run") else {
+        let Ok(root) = hkcu.open_subkey(RUN_KEY) else {
             return Vec::new();
         };
+        let approved = hkcu.open_subkey(STARTUP_APPROVED_RUN_KEY).ok();
+
         root.enum_values()
             .filter_map(Result::ok)
-            .map(|(name, value)| StartupEntry {
-                id: format!("hkcu:{name}"),
-                name,
-                publisher: String::new(),
-                command: String::from_utf8_lossy(&value.bytes)
-                    .trim_matches(char::from(0))
-                    .into(),
-                enabled: true,
-                impact: "未知".into(),
-                scope: "当前用户".into(),
+            .map(|(name, value)| {
+                let enabled = approved
+                    .as_ref()
+                    .and_then(|key| key.get_raw_value(&name).ok())
+                    .map(|value| startup_approved_enabled(&value))
+                    .unwrap_or(true);
+
+                StartupEntry {
+                    id: format!("{STARTUP_ID_PREFIX}{name}"),
+                    name,
+                    publisher: String::new(),
+                    command: String::from_reg_value(&value).unwrap_or_default(),
+                    enabled,
+                    impact: "未知".into(),
+                    scope: "当前用户".into(),
+                }
             })
             .collect()
+    }
+
+    pub fn set_enabled(id: &str, enabled: bool, confirmed: bool) -> Result<(), String> {
+        if !confirmed {
+            return Err("必须确认后才能修改启动项".into());
+        }
+
+        let name = startup_value_name(id)?;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run = hkcu
+            .open_subkey_with_flags(RUN_KEY, KEY_QUERY_VALUE)
+            .map_err(|error| format!("无法读取当前用户启动项: {error}"))?;
+        let command = run
+            .get_raw_value(name)
+            .map_err(|_| "启动项不存在或已更改".to_string())?;
+        if !matches!(command.vtype, REG_SZ | REG_EXPAND_SZ) {
+            return Err("启动项注册表值类型不受支持".into());
+        }
+
+        let (approved, _) = hkcu
+            .create_subkey_with_flags(STARTUP_APPROVED_RUN_KEY, KEY_QUERY_VALUE | KEY_SET_VALUE)
+            .map_err(|error| format!("无法打开启动项状态注册表: {error}"))?;
+        let previous = match approved.get_raw_value(name) {
+            Ok(value) if value.vtype == REG_BINARY => Some(value),
+            Ok(_) => return Err("启动项状态注册表值类型不受支持".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("无法读取启动项状态: {error}")),
+        };
+        approved
+            .set_raw_value(name, &startup_approved_value(previous, enabled))
+            .map_err(|error| format!("无法更新启动项状态: {error}"))
+    }
+
+    fn startup_value_name(id: &str) -> Result<&str, String> {
+        let Some(name) = id.strip_prefix(STARTUP_ID_PREFIX) else {
+            return Err("启动项 ID 格式无效".into());
+        };
+        if name.is_empty()
+            || name.contains('\0')
+            || name.encode_utf16().count() > MAX_REGISTRY_VALUE_NAME_UTF16_LEN
+        {
+            return Err("启动项 ID 格式无效".into());
+        }
+        Ok(name)
+    }
+
+    fn startup_approved_enabled(value: &RegValue) -> bool {
+        if value.vtype != REG_BINARY || value.bytes.len() < std::mem::size_of::<u32>() {
+            return true;
+        }
+        let state = u32::from_le_bytes(value.bytes[..4].try_into().expect("checked length"));
+        state != STARTUP_APPROVED_DISABLED
+    }
+
+    fn startup_approved_value(previous: Option<RegValue>, enabled: bool) -> RegValue {
+        let mut bytes = previous.map(|value| value.bytes).unwrap_or_default();
+        if bytes.len() < 12 {
+            bytes.resize(12, 0);
+        }
+
+        let state = if enabled {
+            STARTUP_APPROVED_ENABLED
+        } else {
+            STARTUP_APPROVED_DISABLED
+        };
+        bytes[..4].copy_from_slice(&state.to_le_bytes());
+        let changed_at = if enabled { 0 } else { windows_filetime_now() };
+        bytes[4..12].copy_from_slice(&changed_at.to_le_bytes());
+
+        RegValue {
+            bytes,
+            vtype: REG_BINARY,
+        }
+    }
+
+    fn windows_filetime_now() -> u64 {
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        elapsed
+            .as_secs()
+            .saturating_add(WINDOWS_EPOCH_OFFSET_SECONDS)
+            .saturating_mul(10_000_000)
+            .saturating_add(u64::from(elapsed.subsec_nanos()) / 100)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn startup_ids_are_scoped_and_reject_empty_or_nul_names() {
+            assert_eq!(startup_value_name("hkcu:OneDrive"), Ok("OneDrive"));
+            assert!(startup_value_name("OneDrive").is_err());
+            assert!(startup_value_name("hkcu:").is_err());
+            assert!(startup_value_name("hkcu:bad\0name").is_err());
+        }
+
+        #[test]
+        fn startup_approved_values_round_trip_without_touching_the_run_command() {
+            let disabled = startup_approved_value(None, false);
+            assert_eq!(disabled.vtype, REG_BINARY);
+            assert_eq!(disabled.bytes.len(), 12);
+            assert!(!startup_approved_enabled(&disabled));
+            assert_ne!(&disabled.bytes[4..12], &[0; 8]);
+
+            let enabled = startup_approved_value(Some(disabled), true);
+            assert!(startup_approved_enabled(&enabled));
+            assert_eq!(&enabled.bytes[4..12], &[0; 8]);
+        }
+
+        #[test]
+        fn malformed_or_unknown_approved_state_fails_open_as_enabled() {
+            let malformed = RegValue {
+                bytes: vec![STARTUP_APPROVED_DISABLED as u8],
+                vtype: REG_BINARY,
+            };
+            let unknown = RegValue {
+                bytes: 0_u32.to_le_bytes().to_vec(),
+                vtype: REG_BINARY,
+            };
+            assert!(startup_approved_enabled(&malformed));
+            assert!(startup_approved_enabled(&unknown));
+        }
     }
 }
 
@@ -531,5 +680,5 @@ pub fn run() {
             reveal_in_explorer
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run Qingpan")
+        .expect("failed to run Lumina Clean")
 }

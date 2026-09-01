@@ -22,6 +22,14 @@ function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
+/**
+ * Maps a backend category and rule name onto the scope used by the cleanup UI.
+ *
+ * Order matters: the most specific product families are matched first, because a
+ * developer-cache rule such as "npm · 包内容缓存" would otherwise fall through to
+ * the generic system bucket and be presented to the user as a Windows system
+ * item.
+ */
 export function inferCleanupScope(categoryValue: string, nameValue: string): CleanupScope {
   const category = categoryValue.toLowerCase();
   const classification = `${category} ${nameValue.toLowerCase()}`;
@@ -31,13 +39,31 @@ export function inferCleanupScope(categoryValue: string, nameValue: string): Cle
     || classification.includes('weixin')
     || classification.includes('xwechat')
   ) return 'wechat';
+  if (classification.includes('qq')) return 'social';
   if (
     classification.includes('浏览器')
     || classification.includes('edge')
     || classification.includes('chrome')
     || classification.includes('firefox')
   ) return 'browser';
+  if (category.includes('开发者')) return 'devtools';
   return category.includes('应用') ? 'apps' : 'system';
+}
+
+/**
+ * Human-readable product a rule belongs to.
+ *
+ * Developer-cache rules carry the tool name ahead of a separator, matching the
+ * browser convention, so the tool rather than "Windows" is surfaced.
+ */
+function inferProduct(scope: CleanupScope, name: string): string {
+  if (scope === 'browser' || scope === 'devtools') {
+    return name.split('·')[0]?.trim() || name;
+  }
+  if (scope === 'apps') return name;
+  if (scope === 'wechat') return '微信';
+  if (scope === 'social') return name.split('·')[0]?.trim() || name;
+  return 'Windows';
 }
 
 function normalizeCleanupItem(item: NativeCleanupItem): CleanupItem {
@@ -49,9 +75,7 @@ function normalizeCleanupItem(item: NativeCleanupItem): CleanupItem {
     ...item,
     fileCount: item.fileCount ?? 0,
     scope,
-    product: scope === 'browser'
-      ? item.name.split('·')[0]?.trim() || item.name
-      : scope === 'apps' ? item.name : scope === 'wechat' ? '微信' : 'Windows',
+    product: inferProduct(scope, item.name),
     reason: item.blockedReason || (isWechatUserData
       ? '命中微信文档根下的明确用户数据目录；默认不勾选，只有主动选择并确认后才会处理'
       : scope === 'wechat'

@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { AlertTriangle, Check, CheckCircle2, ChevronRight, Circle, Database, Info, LoaderCircle, LockKeyhole, RotateCcw, ShieldCheck, ShoppingBasket, Sparkles, Trash2, X } from 'lucide-react';
 import { formatBytes } from './format';
 import type { CleanupItem, CleanupProgress, Confidence, ExecuteResult, Impact, Recoverability } from './types';
@@ -39,7 +39,7 @@ export function Dialog({ title, children, confirmLabel = '确认', danger = fals
 }
 
 const cleanupScopeLabel: Record<CleanupItem['scope'], string> = {
-  system: '系统', browser: '浏览器', apps: '软件', wechat: '微信',
+  system: '系统', browser: '浏览器', apps: '软件', devtools: '开发', wechat: '微信', social: 'QQ',
 };
 
 export function CleanupExecutionSummary({ items, progress, result, error = '', onDone }: {
@@ -60,14 +60,18 @@ export function CleanupExecutionSummary({ items, progress, result, error = '', o
   const retainedFiles = result?.failed.length ?? progress.failedFiles;
   const activeName = error
     ? '清理任务未完成'
-    : finished ? '所选内容已完成复检' : progress.currentItemName || '正在准备清理计划';
+    : finished ? `已释放 ${formatBytes(reclaimedBytes)}` : progress.currentItemName || '正在准备清理计划';
   const activePath = error
     ? error
     : finished ? `${items.length} 个规则类别已处理` : progress.currentPath || '正在验证最近一次扫描快照';
 
   return <div className={`cleanup-execution ${finished ? 'finished' : ''} ${error ? 'failed' : ''}`} role="status" aria-live="polite">
     <div className="execution-progress-hero">
-      <div className="execution-orbit" style={{ '--execution-progress': `${percent * 3.6}deg` } as CSSProperties}>
+      <div className="execution-orbit">
+        <svg className="execution-ring" viewBox="0 0 120 120" aria-hidden="true">
+          <circle className="execution-ring-track" cx="60" cy="60" r="48" pathLength="100" />
+          <circle className="execution-ring-value" cx="60" cy="60" r="48" pathLength="100" strokeDasharray={`${percent} ${100 - percent}`} />
+        </svg>
         <span>{finished ? <CheckCircle2 /> : error ? <AlertTriangle /> : <LoaderCircle />}<strong>{percent}%</strong></span>
       </div>
       <div className="execution-current">
@@ -87,7 +91,7 @@ export function CleanupExecutionSummary({ items, progress, result, error = '', o
     </div>
 
     <div className="execution-summary-head"><strong>具体清理内容</strong><span>{items.length} 个规则类别</span></div>
-    <div className="execution-item-list">
+    <div className="execution-item-list" id="cleanup-result-details">
       {items.map((item, index) => {
         const partial = finished && failedIds.has(item.id);
         const done = finished || index < progress.completedItems || progress.phase === 'item_complete' && item.id === progress.currentItemId;
@@ -100,7 +104,7 @@ export function CleanupExecutionSummary({ items, progress, result, error = '', o
       })}
     </div>
 
-    {(finished || error) && <div className="execution-finish-actions"><span>{error ? <AlertTriangle /> : <ShieldCheck />}{error || (retainedFiles ? '发生变化或被占用的文件已安全保留' : '清理计划已全部完成')}</span><button className="button primary" onClick={onDone}><Check />完成</button></div>}
+    {(finished || error) && <div className="execution-finish-actions"><span>{error ? <AlertTriangle /> : <ShieldCheck />}{error || (retainedFiles ? '发生变化或被占用的文件已安全保留' : '清理计划已全部完成')}</span><div>{finished && <a className="button secondary" href="#cleanup-result-details">查看详情</a>}<button className="button primary" onClick={onDone}><Check />{finished ? '返回首页' : '关闭'}</button></div></div>}
   </div>;
 }
 

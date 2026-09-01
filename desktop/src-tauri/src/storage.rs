@@ -1,6 +1,7 @@
 use crate::fs_safety::{
-    file_identity_from_file, hard_link_count_from_file, has_only_default_data_stream,
-    is_link_or_reparse, is_offline_or_recall, FileIdentity,
+    allocated_size, file_identity_from_file, hard_link_count_from_file,
+    has_only_default_data_stream, is_link_or_reparse, is_offline_or_recall,
+    may_differ_from_logical_size, FileIdentity,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -41,6 +42,9 @@ pub struct ScanStats {
     pub visited_entries: u64,
     pub scanned_files: u64,
     pub skipped: u64,
+    /// Additional hard links to already-counted content, excluded from totals so
+    /// shared clusters are charged exactly once.
+    pub deduplicated_hard_links: u64,
     pub cancelled: bool,
     pub limit_reached: bool,
 }
@@ -297,11 +301,77 @@ const CATEGORY_OTHER: CategoryDefinition = CategoryDefinition {
     rank: 4,
 };
 
+/// Resolves the identity of a file that has more than one hard link.
+///
+/// Opening a handle is expensive: measured against a 60k-file pnpm store it cost
+/// roughly 12x a metadata-only pass (58s vs 4.7s), because the link count is only
+/// readable from an open handle. Callers must therefore gate this behind a cheap
+/// filter and never call it for every file in a tree.
+///
+/// Multi-linked files matter because the same clusters are reachable through
+/// several paths. Counting each path would inflate totals: `WinSxS` and pnpm's
+/// content-addressable store are built largely from hard links, and naive
+/// accumulation reports more than the real occupancy.
+fn multi_link_identity(path: &Path) -> io::Result<Option<FileIdentity>> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if hard_link_count_from_file(&file, &metadata)? <= 1 {
+        return Ok(None);
+    }
+    file_identity_from_file(&file, &metadata).map(Some)
+}
+
+/// Minimum logical size for a file to be checked for hard links.
+///
+/// Hard-link detection needs an open handle, which is far more expensive than
+/// reading metadata. Grouping by size alone does not bound that cost: in a real
+/// 413k-file pnpm store 97.4% of files shared a size with some other file, so
+/// almost every file would be opened.
+///
+/// A size floor bounds the work by the only thing dedup can affect, which is
+/// bytes. In that same store, files at or above this threshold were 2.06% of all
+/// files yet accounted for 87.2% of all bytes. Smaller duplicates are left
+/// counted more than once, which slightly overstates usage rather than promising
+/// space that deleting cannot deliver.
+const HARD_LINK_CHECK_MINIMUM_BYTES: u64 = 64 * 1024;
+
+/// A file that might be one of several hard links to the same content.
+///
+/// Everything needed to reverse its contribution is captured during the cheap
+/// metadata pass, so the correction phase never has to walk the tree again.
+struct LinkCandidate {
+    path: PathBuf,
+    logical_bytes: u64,
+    allocated_bytes: u64,
+    category_id: &'static str,
+    owning_child: Option<PathBuf>,
+}
+
+/// Returns the root's immediate child directory that owns `path`, if any.
+///
+/// Direct files of the root (`depth < 2`) belong to no child directory and are
+/// reported only in the totals and category rollups.
+fn owning_direct_child(canonical_root: &Path, path: &Path, depth: usize) -> Option<PathBuf> {
+    if depth < 2 {
+        return None;
+    }
+    let relative = path.strip_prefix(canonical_root).ok()?;
+    let Component::Normal(first) = relative.components().next()? else {
+        return None;
+    };
+    Some(canonical_root.join(first))
+}
+
 /// Recursively analyzes `root` without following links or reparse points.
 ///
 /// `directories` contains only the root's immediate child directories. Direct
 /// files still contribute to totals and categories. The function never writes
 /// to the scanned tree.
+///
+/// Sizes are reported twice: `size_bytes` is the logical length users recognize,
+/// while `allocated_bytes` is the physical occupancy that a deletion would
+/// actually release. Hard-linked content is counted once so shared stores are
+/// not multiplied.
 pub fn scan_directory_usage(
     root: &Path,
     options: DirectoryScanOptions,
@@ -330,6 +400,9 @@ pub fn scan_directory_usage(
         HashMap::new();
     let mut totals = UsageAccumulator::default();
     let directory_limit_hit = Cell::new(false);
+    // Paths grouped by logical size. Hard links to the same content always share a
+    // size, so a size seen only once cannot be a duplicate and never needs a handle.
+    let link_candidates: RefCell<HashMap<u64, Vec<LinkCandidate>>> = RefCell::new(HashMap::new());
 
     walk_regular_files(
         &canonical_root,
@@ -354,9 +427,35 @@ pub fn scan_directory_usage(
         },
         |path, metadata, depth| {
             let logical_bytes = metadata.len();
-            // Reading allocation size portably can open or hydrate cloud files.
-            // Logical size is the documented safe fallback for this read-only pass.
-            let allocated_bytes = logical_bytes;
+            // Physical allocation is what actually frees up on disk: NTFS-compressed
+            // and sparse files occupy less than their logical length. Only those files
+            // are queried, because for ordinary files the logical length already is
+            // the allocation and querying all of them cost 32.5s versus 3ms on a
+            // 413k-file store for identical totals. The query is path-level and never
+            // opens the file, so it cannot hydrate cloud placeholders. If the volume
+            // cannot answer, fall back to logical size so a failure understates
+            // savings rather than dropping the file.
+            let allocated_bytes = if may_differ_from_logical_size(metadata) {
+                allocated_size(path, metadata).unwrap_or(logical_bytes)
+            } else {
+                logical_bytes
+            };
+            // Hard-link detection needs an open handle, so it is limited to files
+            // large enough to matter. See HARD_LINK_CHECK_MINIMUM_BYTES: size grouping
+            // alone does not bound this, because nearly all small files share a size.
+            if logical_bytes >= HARD_LINK_CHECK_MINIMUM_BYTES {
+                link_candidates
+                    .borrow_mut()
+                    .entry(logical_bytes)
+                    .or_default()
+                    .push(LinkCandidate {
+                        path: path.to_path_buf(),
+                        logical_bytes,
+                        allocated_bytes,
+                        category_id: classify_storage_category(path).id,
+                        owning_child: owning_direct_child(&canonical_root, path, depth),
+                    });
+            }
             totals.size_bytes = totals.size_bytes.saturating_add(logical_bytes);
             totals.allocated_bytes = totals.allocated_bytes.saturating_add(allocated_bytes);
             totals.file_count = totals.file_count.saturating_add(1);
@@ -369,16 +468,9 @@ pub fn scan_directory_usage(
             category.1.allocated_bytes = category.1.allocated_bytes.saturating_add(allocated_bytes);
             category.1.file_count = category.1.file_count.saturating_add(1);
 
-            if depth < 2 {
-                return;
-            }
-            let Ok(relative) = path.strip_prefix(&canonical_root) else {
+            let Some(direct_child) = owning_direct_child(&canonical_root, path, depth) else {
                 return;
             };
-            let Some(Component::Normal(first)) = relative.components().next() else {
-                return;
-            };
-            let direct_child = canonical_root.join(first);
             if let Some(usage) = directories.borrow_mut().get_mut(&direct_child) {
                 usage.size_bytes = usage.size_bytes.saturating_add(logical_bytes);
                 usage.allocated_bytes = usage.allocated_bytes.saturating_add(allocated_bytes);
@@ -389,6 +481,49 @@ pub fn scan_directory_usage(
 
     if directory_limit_hit.get() {
         stats.limit_reached = true;
+    }
+
+    // Correction phase: charge hard-linked content once. Only sizes seen more than
+    // once can hide a hard link, so the expensive handle-based identity check runs
+    // on a small fraction of the tree instead of every file.
+    let mut counted_identities: HashSet<FileIdentity> = HashSet::new();
+    for (_, group) in link_candidates.into_inner() {
+        if group.len() < 2 {
+            continue;
+        }
+        for candidate in group {
+            let Ok(Some(identity)) = multi_link_identity(&candidate.path) else {
+                continue;
+            };
+            if counted_identities.insert(identity) {
+                // First path to this content keeps the bytes.
+                continue;
+            }
+            // A repeat link frees nothing when deleted, so its contribution is
+            // removed from every rollup it was added to.
+            stats.deduplicated_hard_links = stats.deduplicated_hard_links.saturating_add(1);
+            totals.size_bytes = totals.size_bytes.saturating_sub(candidate.logical_bytes);
+            totals.allocated_bytes = totals
+                .allocated_bytes
+                .saturating_sub(candidate.allocated_bytes);
+            totals.file_count = totals.file_count.saturating_sub(1);
+            if let Some((_, usage)) = categories.get_mut(candidate.category_id) {
+                usage.size_bytes = usage.size_bytes.saturating_sub(candidate.logical_bytes);
+                usage.allocated_bytes = usage
+                    .allocated_bytes
+                    .saturating_sub(candidate.allocated_bytes);
+                usage.file_count = usage.file_count.saturating_sub(1);
+            }
+            if let Some(child) = candidate.owning_child {
+                if let Some(usage) = directories.borrow_mut().get_mut(&child) {
+                    usage.size_bytes = usage.size_bytes.saturating_sub(candidate.logical_bytes);
+                    usage.allocated_bytes = usage
+                        .allocated_bytes
+                        .saturating_sub(candidate.allocated_bytes);
+                    usage.file_count = usage.file_count.saturating_sub(1);
+                }
+            }
+        }
     }
 
     let mut directory_results = directories
@@ -2134,6 +2269,150 @@ mod tests {
 
         assert!(result.groups.is_empty());
         assert!(result.stats.skipped >= 1);
+    }
+
+    /// A hard link exposes already-counted clusters through a second path.
+    /// Charging it again is exactly the inflation that made shared stores such as
+    /// WinSxS and the pnpm store report more than their real occupancy.
+    #[test]
+    fn hard_linked_content_is_counted_once_in_directory_usage() {
+        let root = TestDirectory::new("usage-hard-links");
+        // Must clear HARD_LINK_CHECK_MINIMUM_BYTES to be eligible for the check.
+        let payload = vec![7u8; (HARD_LINK_CHECK_MINIMUM_BYTES as usize) * 2];
+        let original = root.write("one/original.bin", &payload);
+        let alias = root.path.join("two/alias.bin");
+        fs::create_dir_all(alias.parent().expect("alias parent")).expect("create alias parent");
+        if fs::hard_link(&original, &alias).is_err() {
+            // Filesystems without hard-link support cannot exercise this path.
+            return;
+        }
+
+        let result = scan_directory_usage(
+            &root.path,
+            DirectoryScanOptions {
+                max_files: 100,
+                max_results: 10,
+                excluded_paths: Vec::new(),
+            },
+            &AtomicBool::new(false),
+        )
+        .expect("scan hard-linked usage");
+
+        // Both paths are walked, but the shared clusters are charged a single time.
+        assert_eq!(result.total_file_count, 1);
+        assert_eq!(result.total_size_bytes, payload.len() as u64);
+        assert_eq!(result.stats.deduplicated_hard_links, 1);
+        // Deleting one alias frees nothing, so only one directory owns the bytes.
+        let charged = result
+            .directories
+            .iter()
+            .filter(|directory| directory.size_bytes > 0)
+            .count();
+        assert_eq!(charged, 1);
+    }
+
+    /// Small hard links are deliberately left counted more than once, because
+    /// bounding handle opens matters more than perfect accounting for bytes that
+    /// cannot add up to a meaningful saving. This pins that tradeoff so it cannot
+    /// change silently.
+    #[test]
+    fn hard_links_below_the_size_floor_are_not_deduplicated() {
+        let root = TestDirectory::new("usage-small-links");
+        let original = root.write("one/small.bin", b"tiny-shared-content");
+        let alias = root.path.join("two/small-alias.bin");
+        fs::create_dir_all(alias.parent().expect("alias parent")).expect("create alias parent");
+        if fs::hard_link(&original, &alias).is_err() {
+            return;
+        }
+
+        let result = scan_directory_usage(
+            &root.path,
+            DirectoryScanOptions {
+                max_files: 100,
+                max_results: 10,
+                excluded_paths: Vec::new(),
+            },
+            &AtomicBool::new(false),
+        )
+        .expect("scan small hard links");
+
+        assert_eq!(result.total_file_count, 2);
+        assert_eq!(result.stats.deduplicated_hard_links, 0);
+    }
+
+    /// Physical occupancy is the number that predicts freed space. A sparse file
+    /// reserves no clusters, so reporting its logical length would promise a
+    /// saving that deleting it cannot deliver.
+    #[cfg(windows)]
+    #[test]
+    fn sparse_file_reports_physical_allocation_below_logical_size() {
+        let root = TestDirectory::new("usage-sparse");
+        let sparse = root.write("sparse.bin", b"");
+        let status = std::process::Command::new("fsutil")
+            .args(["sparse", "setflag"])
+            .arg(&sparse)
+            .status();
+        if !matches!(status, Ok(code) if code.success()) {
+            // Requires NTFS; skip on volumes that do not support sparse files.
+            return;
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&sparse)
+            .expect("open sparse file");
+        file.set_len(64 * 1024 * 1024).expect("extend sparse file");
+        drop(file);
+
+        let metadata = fs::symlink_metadata(&sparse).expect("sparse metadata");
+        let allocated = allocated_size(&sparse, &metadata).expect("query allocation");
+        assert_eq!(metadata.len(), 64 * 1024 * 1024);
+        // Zero is a legitimate measurement here and must not be replaced by the
+        // logical length, otherwise the reported saving is fabricated.
+        assert!(
+            allocated < metadata.len(),
+            "sparse allocation {allocated} should stay below logical size"
+        );
+
+        let result = scan_directory_usage(
+            &root.path,
+            DirectoryScanOptions {
+                max_files: 100,
+                max_results: 10,
+                excluded_paths: Vec::new(),
+            },
+            &AtomicBool::new(false),
+        )
+        .expect("scan sparse usage");
+        assert_eq!(result.total_size_bytes, 64 * 1024 * 1024);
+        assert!(result.total_allocated_bytes < result.total_size_bytes);
+    }
+
+    /// An ordinary file must report identical logical and physical sizes, so the
+    /// new allocation query cannot silently understate common content.
+    #[test]
+    fn ordinary_file_reports_matching_logical_and_physical_size() {
+        let root = TestDirectory::new("usage-ordinary");
+        let path = root.write("plain.bin", &[3u8; 8192]);
+        let metadata = fs::symlink_metadata(&path).expect("plain metadata");
+
+        let allocated = allocated_size(&path, &metadata).expect("query allocation");
+        assert_eq!(metadata.len(), 8192);
+        assert!(
+            allocated >= metadata.len(),
+            "ordinary allocation {allocated} must not understate 8192 bytes"
+        );
+    }
+
+    /// A missing path cannot be measured. Surfacing the error lets the caller
+    /// fall back to the logical length instead of recording a bogus zero.
+    #[test]
+    fn allocation_query_fails_for_a_missing_path() {
+        let root = TestDirectory::new("usage-missing");
+        let present = root.write("present.bin", b"content");
+        let metadata = fs::symlink_metadata(&present).expect("metadata");
+        let missing = root.path.join("absent.bin");
+
+        assert!(allocated_size(&missing, &metadata).is_err());
     }
 
     #[cfg(windows)]

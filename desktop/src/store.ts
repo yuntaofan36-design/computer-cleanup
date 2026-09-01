@@ -29,9 +29,19 @@ interface AppState {
   removeSelected: (ids: string[]) => void;
 }
 
+function readInitialTheme(): AppState['theme'] {
+  try {
+    if (typeof localStorage === 'undefined') return 'system';
+    const stored = localStorage.getItem('luminaTheme') ?? localStorage.getItem('qingpanTheme');
+    return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
 export const useAppStore = create<AppState>((set) => ({
   page: 'overview',
-  theme: 'system',
+  theme: readInitialTheme(),
   disks: [],
   activeDiskId: '',
   cleanupItems: [],

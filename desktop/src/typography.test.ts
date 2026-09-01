@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+const styles = readFileSync(new URL('./lumina.css', import.meta.url), 'utf8');
 
 describe('typography scale', () => {
   it('keeps the smallest visible text token at 12px', () => {

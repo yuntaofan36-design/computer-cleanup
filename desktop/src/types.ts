@@ -10,7 +10,7 @@ export type {
   RiskLevel,
 } from './features/cleanup-plan';
 
-export type Page = 'overview' | 'cleanup' | 'files' | 'analysis' | 'partition' | 'apps' | 'recovery' | 'settings';
+export type Page = 'overview' | 'cleanup' | 'tools' | 'files' | 'analysis' | 'startup' | 'partition' | 'apps' | 'recovery' | 'settings';
 
 export interface DiskInfo {
   id: string;
@@ -148,6 +148,12 @@ export interface StorageCategory {
 export interface ScanStats {
   scannedFiles: number;
   skipped: number;
+  /**
+   * Additional hard links to already-counted content. These were excluded from
+   * the totals so shared clusters are charged once: deleting such a link frees
+   * no space.
+   */
+  deduplicatedHardLinks: number;
   cancelled: boolean;
   limitReached: boolean;
 }

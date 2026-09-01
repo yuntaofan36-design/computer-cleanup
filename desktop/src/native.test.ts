@@ -16,7 +16,16 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: listenMock,
 }));
 
-import { deleteLargeFiles, inferCleanupScope, loadAppIcon, loadApps, loadPartitionDisks } from './native';
+import { startups as previewStartups } from './mockData';
+import {
+  deleteLargeFiles,
+  inferCleanupScope,
+  loadAppIcon,
+  loadApps,
+  loadPartitionDisks,
+  loadStartupEntries,
+  setStartupEntryEnabled,
+} from './native';
 
 const iconDataUrl = 'data:image/png;base64,AA==';
 
@@ -37,6 +46,29 @@ describe('cleanup scope classification', () => {
     expect(inferCleanupScope('浏览器缓存', 'Vivaldi · Default · Cache')).toBe('browser');
     expect(inferCleanupScope('浏览器缓存', '360 极速浏览器 · Default · GPUCache')).toBe('browser');
     expect(inferCleanupScope('浏览器缓存', 'Opera GX · 默认配置 · Code Cache')).toBe('browser');
+  });
+
+  // Developer caches previously fell through to the generic system bucket, so npm
+  // and Maven entries were presented to the user as Windows system items.
+  it('classifies developer tool caches as devtools rather than system', () => {
+    expect(inferCleanupScope('开发者缓存', 'npm · 包内容缓存')).toBe('devtools');
+    expect(inferCleanupScope('开发者缓存', 'Maven · 本地仓库')).toBe('devtools');
+    expect(inferCleanupScope('开发者缓存', 'Cargo · crate 解压源码')).toBe('devtools');
+    expect(inferCleanupScope('开发者缓存', 'pip · 下载缓存')).toBe('devtools');
+    expect(inferCleanupScope('开发者缓存', 'Gradle · 构建缓存')).toBe('devtools');
+  });
+
+  it('separates QQ caches from WeChat and from generic system junk', () => {
+    expect(inferCleanupScope('QQ 缓存', 'QQ · 网络缓存')).toBe('social');
+    expect(inferCleanupScope('QQ 缓存', 'QQ · 崩溃报告')).toBe('social');
+    // WeChat must still win when both could match, preserving existing behaviour.
+    expect(inferCleanupScope('微信运行缓存', '微信 · 网络缓存')).toBe('wechat');
+  });
+
+  it('keeps Windows diagnostic locations in the system scope', () => {
+    expect(inferCleanupScope('系统垃圾', 'Windows · 应用崩溃转储')).toBe('system');
+    expect(inferCleanupScope('系统垃圾', 'Windows · D3D 着色器缓存')).toBe('system');
+    expect(inferCleanupScope('系统缓存', '临时文件')).toBe('system');
   });
 });
 
@@ -171,5 +203,57 @@ describe('native large-file delete progress', () => {
     });
     expect(onProgress).toHaveBeenCalledWith(progress);
     expect(unlistenMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe('startup entry wrappers', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it('uses typed Tauri commands and confirms startup state changes', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      configurable: true,
+      value: {},
+    });
+    const entries = [{
+      id: 'hkcu:OneDrive',
+      name: 'OneDrive',
+      publisher: '',
+      command: 'OneDrive.exe /background',
+      enabled: true,
+      impact: '未知' as const,
+      scope: '当前用户',
+    }];
+    invokeMock.mockResolvedValueOnce(entries).mockResolvedValueOnce(undefined);
+
+    await expect(loadStartupEntries()).resolves.toEqual(entries);
+    await expect(setStartupEntryEnabled('hkcu:OneDrive', false)).resolves.toBeUndefined();
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'list_startup_entries');
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'set_startup_enabled', {
+      id: 'hkcu:OneDrive',
+      enabled: false,
+      confirmed: true,
+    });
+  });
+
+  it('keeps preview changes in an isolated in-memory copy', async () => {
+    Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+    const fixture = previewStartups[0];
+    const originalEnabled = fixture.enabled;
+
+    try {
+      await setStartupEntryEnabled(fixture.id, !originalEnabled);
+      const firstRead = await loadStartupEntries();
+      firstRead[0].enabled = originalEnabled;
+      const secondRead = await loadStartupEntries();
+
+      expect(secondRead[0].enabled).toBe(!originalEnabled);
+      expect(previewStartups[0].enabled).toBe(originalEnabled);
+      expect(invokeMock).not.toHaveBeenCalled();
+    } finally {
+      await setStartupEntryEnabled(fixture.id, originalEnabled);
+    }
   });
 });

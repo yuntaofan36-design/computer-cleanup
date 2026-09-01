@@ -129,6 +129,67 @@ describe('browser cleanup scope', () => {
   });
 });
 
+describe('developer cache cleanup scope', () => {
+  const developerItem: CleanupItem = {
+    ...wechatItem,
+    id: 'maven-repository',
+    scope: 'devtools',
+    category: '开发者缓存',
+    product: 'Maven',
+    name: 'Maven · 本地仓库',
+    path: '%USERPROFILE%\\.m2\\repository',
+    description: '构建时可重新下载的依赖',
+    reason: '命中可再生的依赖缓存目录',
+    sizeBytes: 1_500_000_000,
+    fileCount: 18309,
+  };
+
+  it('gives developer caches their own tab instead of listing them as Windows items', () => {
+    render(
+      <CleanupCenter
+        items={[developerItem]}
+        selected={new Set()}
+        scanning={false}
+        progress={0}
+        scanPath=""
+        onScan={vi.fn()}
+        onToggle={vi.fn()}
+        onOpenBasket={vi.fn()}
+      />,
+    );
+
+    const tab = screen.getByRole('tab', { name: /开发者缓存/ });
+    fireEvent.click(tab);
+
+    // The tool name must be shown, not the generic Windows product label.
+    expect(screen.getByText('Maven')).toBeTruthy();
+    expect(screen.queryByText('Windows')).toBeNull();
+    // The rebuild cost has to be stated before the user cleans a build cache.
+    expect(screen.getByText(/首次构建会重新下载依赖/)).toBeTruthy();
+    // pnpm's store must be called out as excluded, since deleting it breaks projects.
+    expect(screen.getByText(/pnpm store prune/)).toBeTruthy();
+  });
+
+  it('keeps every scope tab reachable once developer and QQ scopes exist', () => {
+    render(
+      <CleanupCenter
+        items={[developerItem, wechatItem, runningBrowserItem, quarantinedTempItem]}
+        selected={new Set()}
+        scanning={false}
+        progress={0}
+        scanPath=""
+        onScan={vi.fn()}
+        onToggle={vi.fn()}
+        onOpenBasket={vi.fn()}
+      />,
+    );
+
+    for (const label of [/全部项目/, /系统盘清理/, /软件缓存/, /浏览器数据/, /开发者缓存/, /微信专清/, /QQ 专清/]) {
+      expect(screen.getByRole('tab', { name: label })).toBeTruthy();
+    }
+  });
+});
+
 describe('cleanup plan controls', () => {
   it('selects every recommended item in the current group', () => {
     const secondSafeItem = { ...wechatItem, id: 'wechat-local-wechat-code-cache', name: '代码缓存' };

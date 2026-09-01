@@ -8,6 +8,7 @@ import {
   largeFiles as previewLargeFiles,
   partitionDisks as previewPartitionDisks,
   records as previewOperationRecords,
+  startups as previewStartups,
   storageCategories as previewStorageCategories,
 } from './mockData';
 export {
@@ -26,6 +27,7 @@ import type {
   OperationRecord,
   PartitionDisk,
   ScanStats,
+  StartupEntry,
   StorageAnalysisResult,
   UninstallLaunchResult,
 } from './types';
@@ -39,6 +41,7 @@ const MAX_CACHED_APP_ICON_REQUESTS = 256;
 const appIconRequests = new Map<string, Promise<string | null>>();
 const appIconQueue: Array<() => void> = [];
 let activeAppIconRequests = 0;
+let previewStartupEntries = previewStartups.map((entry) => ({ ...entry }));
 
 export interface StorageScanOptions {
   maxFiles?: number;
@@ -128,6 +131,7 @@ function previewScanStats(scannedFiles: number): ScanStats {
   return {
     scannedFiles,
     skipped: 0,
+    deduplicatedHardLinks: 0,
     cancelled: false,
     limitReached: false,
   };
@@ -216,6 +220,24 @@ export async function loadApps(): Promise<AppEntry[]> {
   appIconRequests.clear();
   const entries = await invoke<NativeAppEntry[]>('list_apps');
   return entries.map((entry) => ({ ...entry, cacheBytes: 0, lastUsed: '未知' }));
+}
+
+export async function loadStartupEntries(): Promise<StartupEntry[]> {
+  if (!isNativeRuntime()) return previewStartupEntries.map((entry) => ({ ...entry }));
+  return invoke<StartupEntry[]>('list_startup_entries');
+}
+
+export async function setStartupEntryEnabled(id: string, enabled: boolean): Promise<void> {
+  if (!id || id !== id.trim()) throw new Error('启动项标识无效');
+  if (isNativeRuntime()) {
+    return invoke<void>('set_startup_enabled', { id, enabled, confirmed: true });
+  }
+
+  const index = previewStartupEntries.findIndex((entry) => entry.id === id);
+  if (index < 0) throw new Error('启动项不存在或列表已刷新');
+  previewStartupEntries = previewStartupEntries.map((entry, entryIndex) => (
+    entryIndex === index ? { ...entry, enabled } : entry
+  ));
 }
 
 export function loadAppIcon(appId: string): Promise<string | null> {
