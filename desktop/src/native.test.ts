@@ -23,6 +23,7 @@ import {
   loadAppIcon,
   loadApps,
   loadPartitionDisks,
+  loadProtectedDirectories,
   loadStartupEntries,
   loadStartupIcon,
   setStartupEntryEnabled,
@@ -268,5 +269,30 @@ describe('startup entry wrappers', () => {
     } finally {
       await setStartupEntryEnabled(fixture.id, originalEnabled);
     }
+  });
+});
+
+describe('protected directory discovery', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it('loads current-profile paths from the native runtime', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      configurable: true,
+      value: {},
+    });
+    const directories = ['C:\\Users\\Current\\Desktop', 'D:\\OneDrive'];
+    invokeMock.mockResolvedValueOnce(directories);
+
+    await expect(loadProtectedDirectories()).resolves.toEqual(directories);
+    expect(invokeMock).toHaveBeenCalledWith('list_protected_directories');
+  });
+
+  it('does not invent host paths in browser preview mode', async () => {
+    Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+
+    await expect(loadProtectedDirectories()).resolves.toEqual([]);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

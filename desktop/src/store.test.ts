@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useAppStore } from './store';
-import type { CleanupItem } from './types';
+import type { CleanupItem, DiskInfo } from './types';
+
+const disks: DiskInfo[] = [
+  { id: 'd', name: 'Data', mount: 'D:\\', totalBytes: 200, freeBytes: 100 },
+  { id: 'c', name: 'Windows', mount: 'C:\\', totalBytes: 100, freeBytes: 40 },
+];
 
 function item(id: string, overrides: Partial<CleanupItem> = {}): CleanupItem {
   return {
@@ -81,5 +86,31 @@ describe('safe cleanup selection', () => {
 
     useAppStore.getState().toggleItem(chatRecords.id);
     expect([...useAppStore.getState().selected]).toEqual([chatRecords.id]);
+  });
+});
+
+describe('disk selection', () => {
+  beforeEach(() => {
+    useAppStore.setState({ disks: [], activeDiskId: '' });
+  });
+
+  it('selects the C drive by default regardless of enumeration order', () => {
+    useAppStore.getState().setDisks(disks);
+
+    expect(useAppStore.getState().activeDiskId).toBe('c');
+  });
+
+  it('preserves an existing selection while that disk is still available', () => {
+    useAppStore.setState({ disks, activeDiskId: 'd' });
+
+    useAppStore.getState().setDisks([...disks].reverse());
+
+    expect(useAppStore.getState().activeDiskId).toBe('d');
+  });
+
+  it('falls back to the first disk when C is unavailable', () => {
+    useAppStore.getState().setDisks([disks[0]]);
+
+    expect(useAppStore.getState().activeDiskId).toBe('d');
   });
 });

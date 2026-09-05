@@ -7,6 +7,7 @@ mod commands;
 mod fs_safety;
 mod models;
 mod partitions;
+mod protected_directories;
 mod quarantine;
 mod scanner;
 mod storage;
@@ -98,6 +99,11 @@ fn list_disks() -> Vec<DiskInfo> {
             free_bytes: disk.available_space(),
         })
         .collect()
+}
+
+#[tauri::command]
+fn list_protected_directories() -> Vec<String> {
+    protected_directories::discover()
 }
 
 fn emit_large_file_delete_progress(app: &AppHandle, progress: LargeFileDeleteProgress) {
@@ -686,6 +692,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             list_disks,
+            list_protected_directories,
             partitions::list_partition_disks,
             partitions::open_windows_disk_management,
             commands::cleanup::handlers::scan_cleanup_v2,

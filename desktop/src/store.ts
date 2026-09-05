@@ -39,6 +39,11 @@ function readInitialTheme(): AppState['theme'] {
   }
 }
 
+function defaultDiskId(disks: DiskInfo[]): string {
+  const systemDisk = disks.find((disk) => /^c:[\\/]*$/i.test(disk.mount.trim()));
+  return systemDisk?.id ?? disks[0]?.id ?? '';
+}
+
 export const useAppStore = create<AppState>((set) => ({
   page: 'overview',
   theme: readInitialTheme(),
@@ -53,7 +58,12 @@ export const useAppStore = create<AppState>((set) => ({
   basketOpen: false,
   setPage: (page) => set({ page }),
   setTheme: (theme) => set({ theme }),
-  setDisks: (disks) => set((state) => ({ disks, activeDiskId: state.activeDiskId || disks[0]?.id || '' })),
+  setDisks: (disks) => set((state) => ({
+    disks,
+    activeDiskId: disks.some((disk) => disk.id === state.activeDiskId)
+      ? state.activeDiskId
+      : defaultDiskId(disks),
+  })),
   setActiveDiskId: (activeDiskId) => set({ activeDiskId }),
   setCleanupItems: (cleanupItems) => set({ cleanupItems }),
   setScanning: (scanning) => set({ scanning }),

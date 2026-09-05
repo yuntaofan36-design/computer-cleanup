@@ -206,6 +206,11 @@ export async function loadDisks(): Promise<DiskInfo[]> {
   return invoke<DiskInfo[]>('list_disks');
 }
 
+export async function loadProtectedDirectories(): Promise<string[]> {
+  if (!isNativeRuntime()) return [];
+  return invoke<string[]>('list_protected_directories');
+}
+
 export async function loadPartitionDisks(): Promise<PartitionDisk[]> {
   if (!isNativeRuntime()) return previewPartitionDisks;
   return invoke<PartitionDisk[]>('list_partition_disks');

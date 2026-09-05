@@ -121,8 +121,8 @@ export default function SettingsPage({
       </div>
 
       <div className="settings-group">
-        <div className="settings-heading"><span className="settings-icon protected" aria-hidden="true"><FolderLock /></span><div><h2>数据保护</h2><p>保护目录在所有阶段生效；明确路径排除会在只读扫描入口直接剪枝。</p></div></div>
-        <div className="setting-row setting-row-stacked"><span><strong>受保护目录</strong><small>这些目录永不进入扫描、清理或分析候选项。</small></span><PathList items={protectedDirectories} emptyText="当前没有额外受保护目录。" /></div>
+        <div className="settings-heading"><span className="settings-icon protected" aria-hidden="true"><FolderLock /></span><div><h2>数据保护</h2><p>系统保护范围来自当前用户配置；明确路径排除会在只读扫描入口直接剪枝。</p></div></div>
+        <div className="setting-row setting-row-stacked"><span><strong>受保护目录</strong><small>根据当前 Windows 用户配置动态识别，不使用预置盘符或用户名。</small></span><PathList items={protectedDirectories} emptyText="当前系统未发现受保护目录。" /></div>
         <div className="setting-row setting-row-stacked"><span><strong>自定义排除</strong><small>加入后，大文件、重复项、磁盘分析与清理建议都会跳过该路径。</small></span><form className="setting-path-form" onSubmit={submitExclusion}><label><span className="visually-hidden">要排除的文件夹路径</span><input value={exclusionInput} onChange={(event) => setExclusionInput(event.target.value)} placeholder="例如 D:\Work\Important" /></label><button className="button secondary" type="submit" disabled={!exclusionInput.trim()}><FolderPlus />加入</button></form><PathList items={userExclusions} emptyText="尚未添加自定义排除路径。" onRemove={onRemoveExclusion} /></div>
         <div className="setting-row setting-row-stacked"><span><strong>内置排除规则</strong><small>这些规则由安全内核维护。</small></span><PathList items={builtInExclusionRules} emptyText="当前没有内置排除规则。" /></div>
       </div>

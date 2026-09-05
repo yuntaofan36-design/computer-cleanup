@@ -220,10 +220,3 @@ export const storageCategories: StorageCategory[] = [
   { id: 'docs', label: '文档与项目', sizeBytes: 46.7 * GB, color: '#e05d6f', description: '文档、源代码和设计文件' },
   { id: 'other', label: '其他', sizeBytes: 39.5 * GB, color: '#7b67d8', description: '尚未归类的内容' },
 ];
-
-export const protectedPaths = [
-  { path: 'C:\\Users\\User\\Desktop', label: '桌面', reason: '用户内容，永不自动清理' },
-  { path: 'C:\\Users\\User\\Documents', label: '文档', reason: '用户内容，永不自动清理' },
-  { path: 'D:\\Work', label: '工作目录', reason: '用户排除规则' },
-  { path: 'D:\\OneDrive', label: '云同步目录', reason: '避免同步状态与占位文件风险' },
-];

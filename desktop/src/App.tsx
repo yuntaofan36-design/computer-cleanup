@@ -31,7 +31,6 @@ import {
   disks as previewDisks,
   duplicateGroups as previewDuplicateGroups,
   largeFiles as previewLargeFiles,
-  protectedPaths,
   records as previewRecords,
   storageCategories as previewStorageCategories,
 } from './mockData';
@@ -43,6 +42,7 @@ import {
   loadDisks,
   loadOperationRecords,
   loadPartitionDisks,
+  loadProtectedDirectories,
   loadStartupEntries,
   openWindowsDiskManagement,
   requestUninstall,
@@ -165,6 +165,7 @@ export default function App() {
   const [partitionLoading, setPartitionLoading] = useState(false);
   const [partitionLoaded, setPartitionLoaded] = useState(false);
   const [partitionError, setPartitionError] = useState('');
+  const [protectedDirectories, setProtectedDirectories] = useState<string[]>([]);
   const [fileScanStatus, setFileScanStatus] = useState<TaskStatus>(nativeRuntime ? 'idle' : 'complete');
   const [analysisScanStatus, setAnalysisScanStatus] = useState<TaskStatus>(nativeRuntime ? 'idle' : 'complete');
   const [fileScannedAt, setFileScannedAt] = useState(nativeRuntime ? '' : '演示数据');
@@ -220,6 +221,7 @@ export default function App() {
 
   useEffect(() => {
     loadDisks().then(setDisks).catch((error) => setToast(error instanceof Error ? error.message : '无法读取磁盘'));
+    loadProtectedDirectories().then(setProtectedDirectories).catch((error) => setToast(error instanceof Error ? error.message : '无法读取受保护目录'));
     loadApps().then(setInstalledApps).catch((error) => setToast(error instanceof Error ? error.message : '无法读取应用清单'));
     loadStartupEntries().then(setStartupEntries).catch((error) => setStartupError(error instanceof Error ? error.message : '无法读取启动项'));
     loadOperationRecords(50).then(setOperationRecords).catch(() => setOperationRecords(nativeRuntime ? [] : previewRecords));
@@ -631,7 +633,7 @@ export default function App() {
         {page === 'partition' && <DiskPartition disks={partitionDisks} loading={partitionLoading} error={partitionError} onRefresh={() => void refreshPartitionLayout()} onOpenDiskManagement={() => void openPartitionManager()} />}
         {page === 'apps' && <AppManagement apps={installedApps} busyAppId={busyAppId} onRequestUninstall={(app) => void uninstall(app.id)} onClearCache={(app) => { setPage('cleanup'); setToast(`请在应用缓存中复核 ${app.name} 的可重建内容`); }} />}
         {page === 'recovery' && <RecoveryCenter auditRecords={operationRecords} />}
-        {page === 'settings' && <SettingsPage protectedDirectories={protectedPaths.map((item) => item.path)} builtInExclusionRules={builtInExclusionRules} userExclusions={userExclusions} onAddExclusion={addExclusion} onRemoveExclusion={removeExclusion} theme={theme} setTheme={setTheme} />}
+        {page === 'settings' && <SettingsPage protectedDirectories={protectedDirectories} builtInExclusionRules={builtInExclusionRules} userExclusions={userExclusions} onAddExclusion={addExclusion} onRemoveExclusion={removeExclusion} theme={theme} setTheme={setTheme} />}
       </main>
     </div>
 

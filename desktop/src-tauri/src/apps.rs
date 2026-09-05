@@ -137,7 +137,8 @@ pub struct LaunchResult {
     pub status: String,
 }
 
-/// Enumerate the per-user and machine-wide 32-bit and 64-bit uninstall views.
+/// Enumerate the shared per-user uninstall branch once and both machine-wide
+/// 32-bit and 64-bit uninstall views.
 ///
 /// Individual inaccessible or malformed keys are ignored. This is important on
 /// managed Windows machines where seeing one protected entry must not hide all
@@ -617,19 +618,16 @@ mod platform {
         }
     }
 
-    pub(super) fn enumerate() -> InstalledAppSnapshot {
-        let sources = [
+    fn registry_sources() -> [RegistrySource; 3] {
+        [
+            // HKCU\SOFTWARE is shared between WOW64 views. Reading it with
+            // both flags returns the same physical uninstall keys, so keep a
+            // single source and retain the existing 64-bit identity label.
             RegistrySource {
                 hive_name: "HKCU",
                 hive: HKEY_CURRENT_USER,
                 view_name: "64",
                 view_flag: KEY_WOW64_64KEY,
-            },
-            RegistrySource {
-                hive_name: "HKCU",
-                hive: HKEY_CURRENT_USER,
-                view_name: "32",
-                view_flag: KEY_WOW64_32KEY,
             },
             RegistrySource {
                 hive_name: "HKLM",
@@ -643,10 +641,12 @@ mod platform {
                 view_name: "32",
                 view_flag: KEY_WOW64_32KEY,
             },
-        ];
+        ]
+    }
 
+    pub(super) fn enumerate() -> InstalledAppSnapshot {
         let mut snapshot = InstalledAppSnapshot::default();
-        for source in sources {
+        for source in registry_sources() {
             enumerate_source(&source, &mut snapshot);
         }
         snapshot
@@ -1035,6 +1035,18 @@ mod platform {
                 | "sh.exe"
                 | "wsl.exe"
         )
+    }
+
+    #[cfg(test)]
+    mod registry_source_tests {
+        use super::registry_sources;
+
+        #[test]
+        fn shared_current_user_uninstall_branch_is_enumerated_once() {
+            let identities = registry_sources().map(|source| (source.hive_name, source.view_name));
+
+            assert_eq!(identities, [("HKCU", "64"), ("HKLM", "64"), ("HKLM", "32")]);
+        }
     }
 }
 
